@@ -1,0 +1,6 @@
+# Ordon Link movement and background collision (ordon_timing.cpp).
+@02063BFC  # ordinary stick sample consumed by Link
+@0208634C  # capture Link's position before posMove
+028C56B8   # local Link call to Acch::CrrPos
+@02086404  # position committed after the actor handles the collision result
+028C42B4   # moving-background correction, once per pair

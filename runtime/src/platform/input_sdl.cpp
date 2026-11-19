@@ -6,6 +6,7 @@
 #include "../input_map.h"
 #include "../mods/builtin.h"
 #include "../motion/motion.h"
+#include "../ordon60.h"
 #include "../rumble.h"
 #include "../runtime.h"
 #include "../savestate.h"
@@ -543,13 +544,13 @@ namespace input {
 static void apply_scenario(PadState& s) {
     static const Scenario sc;
     if (!sc.origin || render::frame_count() < sc.origin) return;
-    // scenario time = game time: full logic steps / 30 (frame-time hitches don't shift the input)
-    static const uint64_t s0 = [] {
-        LOG("[test] origin at guest time %.4f s, logic step %llu", (double)timebase::now() / timebase::kTicksPerSec,
-            (unsigned long long)interp::logic_steps());
-        return interp::logic_steps();
+    // The legacy swap has already incremented logic_steps() when the supplemental pass reads input.
+    const double tick = double(interp::logic_steps()) - (ordon60::supplemental_pass() ? 0.5 : 0.0);
+    static const double origin_tick = [tick] {
+        LOG("[test] origin at guest time %.4f s, logic step %.1f", (double)timebase::now() / timebase::kTicksPerSec, tick);
+        return tick;
     }();
-    double t = (double)(interp::logic_steps() - s0) / 30.0;
+    const double t = (tick - origin_tick) / 30.0;
     static std::atomic<bool> mode_set{false}, ended{false};
     static std::atomic<int> dbg{0};
     if (getenv("WWHD_TEST_DEBUG") && dbg++ % 30 == 0) LOG("[test] t=%.3f frame %llu", t, (unsigned long long)render::frame_count());

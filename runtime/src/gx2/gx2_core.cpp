@@ -24,6 +24,7 @@
 #endif
 #include "runtime.h"
 #include "../aspect.h"
+#include "../ordon60.h"
 #include "gfx/renderer.h"
 #include "platform/perf_hint.h"
 #include "render_prof.h"
@@ -463,7 +464,9 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
         break;
     case OP_SWAP:
         if (n) render::set_frame_aspect(gx2::bitsf(p[0]));  // aspect ratio from the next frame on (aspect.cpp)
+        if (n >= 3) ordon60::set_present_picture(p[2]);
         render::swap();
+        if (n >= 3) ordon60::set_present_picture(0);
         break;
     case OP_SETUP_CONTEXT:
         g_contexts[p[0]].assign(kNumRegs, 0);
@@ -774,7 +777,9 @@ HLE(gx2, GX2SwapScanBuffers) {
     uint32 ab;
     memcpy(&ab, &a, 4);
     interp::step_done();
-    emit_host(OP_SWAP, {ab, 0u});  // 0: a new logic step (render-thread profiler; no hold passes at 30 fps)
+    const uint32_t picture = ordon60::take_picture();
+    if (picture) emit_host(OP_SWAP, {ab, 0u, picture});
+    else emit_host(OP_SWAP, {ab, 0u});  // 0: a new logic step (render-thread profiler)
     {
         std::lock_guard<std::mutex> lk(g_flip_mutex);
         update_flips();

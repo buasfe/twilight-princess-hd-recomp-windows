@@ -29,8 +29,26 @@
 #include "mods/mods.h"
 #include "mods/packages.h"
 #include "mods/photo.h"
+#include "ordon60.h"
 #include "runtime.h"
 #include "savestate.h"
+
+namespace ordon60 {
+namespace {
+enum class Pass { Stock, Legacy, Supplemental };
+std::atomic<Pass> current_pass{Pass::Stock};
+uint64_t current_pair = 0;  // game thread
+}
+
+bool paired_pass() { return current_pass.load(std::memory_order_relaxed) != Pass::Stock; }
+bool supplemental_pass() { return current_pass.load(std::memory_order_relaxed) == Pass::Supplemental; }
+uint64_t pair_id() { return current_pair; }
+void set_pass(bool paired, bool supplemental) {
+    if (paired && !supplemental) ++current_pair;
+    current_pass.store(supplemental ? Pass::Supplemental : paired ? Pass::Legacy : Pass::Stock,
+                       std::memory_order_relaxed);
+}
+}  // namespace ordon60
 
 namespace interp {
 
@@ -84,8 +102,11 @@ void set_present_vsync(bool) {}
 
 // gx2_core.cpp's virtual vsync: N+1 presents per step. At 60 fps the game's interval (2 vsyncs) is halved; at
 // 120/240 fps the virtual vsync also ticks 2/4 times per vsync.
-uint32_t effective_swap_interval(uint32_t game) { return g_on ? (game > 1 ? game / 2 : 1) : game; }
-int vsync_rate() { return g_on ? frames_per_step() / 2 : 1; }
+uint32_t effective_swap_interval(uint32_t game) {
+    if (ordon60::paired_pass()) return 1;
+    return g_on ? (game > 1 ? game / 2 : 1) : game;
+}
+int vsync_rate() { return g_on && !ordon60::paired_pass() ? frames_per_step() / 2 : 1; }
 
 // logic steps so far (test scenarios and profiles run on game time): one per logic pass's swap
 static std::atomic<uint64_t> g_steps{0};
@@ -93,8 +114,10 @@ uint64_t logic_steps() { return g_steps.load(std::memory_order_relaxed); }
 void step_done() {  // GX2SwapScanBuffers, game thread
     if (!g_hold) mods::packages::frame(++g_steps);
 }
+// An Ordon pair finishes on its original schedule if the interpolation setting changes during the pair.
+static bool blend_enabled() { return g_on && !ordon60::paired_pass(); }
 // the blend fraction of this pass: 1 on the record pass and without interpolation
-static float pass_t() { return g_on ? float(g_phase + 1) / float(g_n + 1) : 1.0f; }
+static float pass_t() { return blend_enabled() ? float(g_phase + 1) / float(g_n + 1) : 1.0f; }
 static bool record_pass() { return g_hold && g_phase == g_n; }
 
 // ---------------------------------------------------------------- camera
@@ -256,27 +279,35 @@ void f_028E13CC_orig(Cpu* c);
 void f_02B5CF50_orig(Cpu* c);
 }
 
+static void draw_camera_view(Cpu* c) {
+    if (ordon60::tracing()) {
+        const uint32_t view = c->r[3], eye = view + interp::kEye;
+        ordon60::record(ordon60::Event::Draw, view, float(ldf32(eye)), float(ldf32(eye + 4)), float(ldf32(eye + 8)));
+    }
+    f_028E13CC_orig(c);
+}
+
 // camera_draw(camera_process_class*). The view's aspect comes from the game's screen aspect (1012B374, aspect.cpp)
 // each draw: the camera copies it only when it is made (028D7578), so a changed aspect reaches the 3D view at once.
 static void draw_camera(Cpu* c) {
     using namespace interp;
     const uint32_t v = c->r[3];
     st32(v + 0xD4, ld32(0x1012B374));
-    if (!g_on) return f_028E13CC_orig(c);
+    if (!blend_enabled()) return draw_camera_view(c);
     CamPrev& p = g_cams[v];
     const Cam cur = read_cam(v);
     if (record_pass()) {  // exact: the next step's "before"
         p.s = cur;
         p.valid = true;
-        return f_028E13CC_orig(c);
+        return draw_camera_view(c);
     }
-    if (!p.valid) return f_028E13CC_orig(c);
+    if (!p.valid) return draw_camera_view(c);
     if (!g_hold) decide_cut(p, p.s, cur);
     Cam mid;
     const bool blended = blend_cam(p, p.s, cur, pass_t(), mid);
     if (blended) write_cam(v, mid);
     stf32(v + kTrim, lerp(p.s.trim, cur.trim, pass_t()));  // the bars slide in and out between steps, cut or not
-    f_028E13CC_orig(c);
+    draw_camera_view(c);
     if (blended) write_cam(v, cur);
     stf32(v + kTrim, cur.trim);
 }
@@ -289,7 +320,7 @@ extern "C" void hook_028E13CC(Cpu* c) {  // the built-in mod "no-bars" draws wit
         mods::photo::aim(cam);
         st32(cam + 0xD4, ld32(0x1012B374));
         st32(v, 0);
-        f_028E13CC_orig(c);
+        draw_camera_view(c);
         memcpy(mem::ptr(cam + interp::kEye), view, sizeof view);
         st32(v, trim);
         return;
@@ -304,7 +335,7 @@ extern "C" void hook_028E13CC(Cpu* c) {  // the built-in mod "no-bars" draws wit
 extern "C" void hook_02B5CF50(Cpu* c) {
     using namespace interp;
     const uint32_t model = c->r[3];
-    if (!g_on) return f_02B5CF50_orig(c);
+    if (!blend_enabled()) return f_02B5CF50_orig(c);
     const uint32_t data = ld32(model), buf = ld32(model + 0x80);
     const uint32_t n = data ? ld16(data + 0x24) : 0, w = data ? ld16(data + 0x26) : 0;
     const uint32_t anm = buf ? ld32(buf + 0x0C) : 0, wev = buf ? ld32(buf + 0x10) : 0;
@@ -387,7 +418,7 @@ CALC_MODEL(02B5D320)
 extern "C" void f_02B58040_orig(Cpu* c);
 extern "C" void hook_02B58040(Cpu* c) {
     using namespace interp;
-    if (!g_on || !g_calc_model) return f_02B58040_orig(c);
+    if (!blend_enabled() || !g_calc_model) return f_02B58040_orig(c);
     const uint32_t ma = c->r[3];
     uint32_t anms[26], n = 0, saved[26];
     auto add = [&](uint32_t e) {
@@ -429,7 +460,7 @@ extern "C" void hook_02B58040(Cpu* c) {
 extern "C" void f_02B17008_orig(Cpu* c);
 extern "C" void hook_02B17008(Cpu* c) {
     using namespace interp;
-    if (!g_on) return f_02B17008_orig(c);
+    if (!blend_enabled()) return f_02B17008_orig(c);
     const bool rec = !g_hold;  // the painter runs before the pass's particle calc: a logic pass shows the step before
     const float t = float(g_phase) / float(g_n + 1);
     std::vector<std::pair<uint32_t, PtclPrev>> put_back;
@@ -470,7 +501,7 @@ static uint32_t alpha_at(uint32_t pane) {
 }
 
 void interp::blend_pane(uint32_t pane, std::vector<std::pair<uint32_t, uint32_t>>& saved) {
-    if (!g_on) return;
+    if (!blend_enabled()) return;
     if (!g_hold) {
         PanePrev& p = g_panes[pane];
         p.pass = g_records;
@@ -515,14 +546,12 @@ void interp::blend_pane(uint32_t pane, std::vector<std::pair<uint32_t, uint32_t>
         if (g_hold) c->r[3] = 1;                                                                \
         else f_##a##_orig(c);                                                                   \
     }
-HOLD_SKIP(02AF0A98)     // pad read
 HOLD_SKIP(02AD9F9C)     // audio
 HOLD_SKIP(02003ED8)
 HOLD_SKIP(02AF09B8)
 HOLD_SKIP(02AFA7A0)     // HD systems (object at 1012B65C)
 HOLD_SKIP_OK(02AD9664)  // fpcPi_Handler
 HOLD_SKIP_OK(02AD6C78)  // fpcCt_Handler
-HOLD_SKIP(02AD752C)     // fpcEx_Handler
 HOLD_SKIP(0290DD38)
 HOLD_SKIP(02ACD0A8)     // fapGm_After
 HOLD_SKIP(02BEF838)     // cCt_Counter
@@ -535,6 +564,55 @@ HOLD_SKIP(028C2C00)     // dComIfG_Bgsp().Move()
 HOLD_SKIP(02A9D6E4)     // particle calc 3D
 HOLD_SKIP(02A9D41C)     // particle calc 2D
 HOLD_SKIP_OK(02AD5B3C)  // fopScnM_ChangeReq
+
+extern "C" void f_02AF0A98_orig(Cpu* c);
+extern "C" void hook_02AF0A98(Cpu* c) {  // main01's pad poll
+    if (g_hold) return;
+    // This caller waits for the preceding flip when r24 is zero and r26 is nonzero.
+    if (ordon60::paired_pass() && c->lr == 0x02AF0F3C && !c->r[24] && c->r[26]) return;
+    f_02AF0A98_orig(c);
+}
+
+extern "C" void site_02AF0F50(Cpu* c) {
+    // Sample after the wait, before the painter and actor dispatch, once on the paired legacy pass.
+    if (!ordon60::paired_pass() || ordon60::supplemental_pass()) return;
+    const Cpu saved = *c;
+    c->lr = 0x02AF0F3C;
+    f_02AF0A98_orig(c);
+    *c = saved;
+}
+
+extern "C" void f_02AD752C_orig(Cpu* c);
+extern "C" void hook_02AD752C(Cpu* c) {  // fpcEx_Handler
+    if (ordon60::supplemental_pass()) {
+        const Cpu saved = *c;
+        ordon60::advance_walk(c);
+        *c = saved;
+        ordon60::advance_camera(c);
+        *c = saved;
+        return;
+    }
+    if (!g_hold) {
+        ordon60::record(ordon60::Event::Legacy);
+        f_02AD752C_orig(c);
+    }
+}
+
+extern "C" void site_02AF0EF4(Cpu* c) {
+    // Undo the inline ADDI for main01's frame counter on the supplemental pass.
+    if (ordon60::supplemental_pass()) --c->r[8];
+}
+
+extern "C" void f_02AEE6A8_orig(Cpu* c);
+extern "C" void hook_02AEE6A8(Cpu* c) {
+    // main01's modulo test sees the same counter value on both passes.
+    if (!ordon60::supplemental_pass() || c->lr != 0x02AF0F38) f_02AEE6A8_orig(c);
+}
+
+extern "C" void site_02AEAE70(Cpu*) {
+    // The painter consumes the view and model state prepared by the previous draw handler.
+    ordon60::begin_picture();
+}
 
 // The painter advances the screen fade (mDoGph_gInf_c::calcFade 02AEAD04: rate 1012B364 += speed 1012B368 while on,
 // 1012B3BE) and the wipe (dDlst_list_c::calcWipe 02919F48: rate 1011DAF0, speed 1011DAF4, on 1011DAFC) each pass and
@@ -607,6 +685,7 @@ static uint8_t g_wide_zoom = 0;
 extern "C" void f_02AD6EB0_orig(Cpu* c);
 extern "C" void hook_02AD6EB0(Cpu* c) {  // fpcDt_Handler
     restore_models();
+    ordon60::restore_sampled_pose();
     if (g_hold) st8(0x1012B3C3, g_wide_zoom);
     if (!g_hold) f_02AD6EB0_orig(c);
 }
@@ -622,14 +701,23 @@ extern "C" void hook_02AC08B4(Cpu* c) {  // dScnPly_Draw
 // main01's frame loop (02AF0EDC, top of each pass): the main thread's state is all in guest memory and
 // its registers, so save states are taken and restored here (savestate.cpp); test warps and amiibo taps are
 // requested here, and the gyro learns whether the game aims (mods.cpp).
-// With interpolation on, each logic pass is followed by N hold passes.
+// Interpolation adds N draw-only passes. The Ordon experiment adds one supplemental gameplay pass.
 namespace warp { void service(Cpu* c); }  // warp.cpp
 extern "C" void site_02AF0EDC(Cpu* c) {
     using namespace interp;
-    if (g_hold && g_phase == g_n) g_records++;  // the record pass just ended
+    const bool was_supplemental = ordon60::supplemental_pass();
+    const bool supplemental = ordon60::paired_pass() && !was_supplemental;
+    if (g_hold && !was_supplemental && g_phase == g_n) g_records++;  // the record pass just ended
     g_passes++;
     if (!g_hold) g_wide_zoom = ld8(0x1012B3C3);  // g_hold is still the pass that ended
     else st8(0x1012B3C3, g_wide_zoom);
+    ordon60::set_pass(supplemental, supplemental);
+    if (supplemental) {
+        // Finish a pair before servicing requests or re-evaluating eligibility on the next legacy pass.
+        g_phase = g_n = 0;
+        g_hold = true;
+        return;
+    }
     // the next pass of the step (after the logic pass: hold pass 1; after hold pass N: the next logic pass); a
     // change of rate starts over with a logic pass
     const int n = g_on && !gx2::turbo() ? frames_per_step() - 1 : 0;  // turbo: logic passes only
@@ -645,4 +733,5 @@ extern "C" void site_02AF0EDC(Cpu* c) {
     aspect::service(c);
     mods::update_aiming();
     mods::builtin::step(c);
+    if (ordon60::eligible()) ordon60::set_pass(true, false);
 }

@@ -1,0 +1,21 @@
+# Ordon supplemental camera chase center and Link pose (ordon_camera.cpp).
+@028E12C8  # start gameplay camera execute
+@028E7084  # settled chase center target and gain before native integration
+@028E7948  # settled chase manual-orbit eligibility
+@028E7984  # native filtered yaw rate
+@028E7988  # native per-pass yaw increment
+@028E12E4  # normal camera view and matrix commit
+0208AB30   # Link's profile draw callback
+02088508   # Link's J3D model submission, body and attachments
+0208858C
+02088608
+@028DFD0C  # legacy camera mode timers
+@028DFD14
+@028DFD1C
+@028DFDC4
+@028DFDCC
+@028DFDD4
+@028DFDEC
+@028DFDF4
+@028DFD70
+@028DFD78

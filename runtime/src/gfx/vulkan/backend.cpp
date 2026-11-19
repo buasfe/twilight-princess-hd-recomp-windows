@@ -13,6 +13,7 @@
 #include "gfx/display_modes.h"
 #include "gx2/gx2.h"
 #include "input.h"
+#include "ordon60.h"
 #include "overlay/hostui.h"
 #include "overlay/overlay.h"
 #ifdef WWHD_SDL_HOST
@@ -1231,6 +1232,8 @@ static void present(Screen &s) {
   VkResult pr = timed_call(timing.present, [&] {
     return vkQueuePresentKHR(R.queue, &pi);
   }, rprof::kWaitPresent);
+  if (&s == &R.tv && (pr == VK_SUCCESS || pr == VK_SUBOPTIMAL_KHR))
+    ordon60::record_present();
 #ifdef __ANDROID__
   // SUBOPTIMAL here only says the compositor rotates the picture (identity pre-transform, see
   // make_swapchain); size changes come as window events. Rebuilding would happen every frame.

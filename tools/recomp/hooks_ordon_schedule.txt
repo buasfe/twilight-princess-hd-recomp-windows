@@ -1,0 +1,5 @@
+# Ordon 60 Hz scheduler and render tracing (interp.cpp).
+@02AEAE70  # painter entry, consuming the previous draw handler's state
+@02AF0EF4  # main01's legacy frame counter increment
+@02AF0F50  # native pad poll after the preceding swap has cleared
+02AEE6A8   # main01's periodic callback driven by the legacy frame counter

@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include "input.h"
 #include "input_map.h"
+#include "ordon60.h"
 #include "rumble.h"
 #include "platform/input_sdl.h"
 static int savedSlot=0, loadedSlot=0, saveRequests=0, loadRequests=0;
@@ -16,6 +17,7 @@ namespace render { uint64_t frame_count(){return 0;} }
 namespace gfxvk { bool graphics_hotkey(char key,bool activate){if(activate){++graphicsRequests;graphicsKey=key;}return true;} }
 namespace mods { double game_time(){return 0;} }
 namespace interp { void set_mode(int){} uint64_t logic_steps(){return 0;} }
+namespace ordon60 { bool supplemental_pass(){return false;} }
 namespace timebase { uint64_t now(){return 0;} }
 void log_msg(const char*,...){}
 // settings overlay: closed (keys reach the game and its shortcuts as before)
