@@ -24,6 +24,7 @@
 #include "controls_view.h"
 #include "../amiibo.h"
 #include "../aspect.h"
+#include "../button_prompts.h"
 #include "../look.h"
 #include "../crashrec.h"
 #include "../game_languages.h"
@@ -1205,6 +1206,14 @@ void gyro_window(bool& open) {
 void tab_controls() {
     bool v;
     input_map::Mapping m = input_map::current();
+    int prompts=int(m.prompts);
+    ImGui::SetNextItemWidth(230);
+    if(ImGui::Combo("Button prompts",&prompts,"Auto\0Original Wii U\0Xbox\0PlayStation\0Keyboard / Mouse\0")) {
+        m.prompts=input_map::Mapping::Prompts(prompts);input_map::set_current(m);
+    }
+    const auto device=button_prompts::active_device();
+    ImGui::SameLine();ImGui::TextDisabled("%s",button_prompts::style_name(button_prompts::style(m,device.family)));
+    help("Changes the game's prompts using your actual bindings. Original Wii U preserves the authored icons. Virtual controllers may report the emulated controller type; choose a style manually if necessary.");
     // top: which controller the keyboard and controllers act as (the drawing follows), view switch
     const bool pro = input::pro_controller();
     ImGui::AlignTextToFramePadding();

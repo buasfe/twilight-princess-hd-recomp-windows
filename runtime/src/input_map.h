@@ -52,10 +52,12 @@ int key_from_id(const std::string& id);  // kNoKey if unknown
 const char* reserved_key(int code);
 
 struct Mapping {
+    enum class Prompts : uint8_t { kAuto, kOriginal, kXbox, kPlayStation, kKeyboard };
     std::array<std::array<int, kKeysPerAction>, kActionCount> keys;  // kNoKey = empty slot
     std::array<int, kActionCount> pad;                                // kPadNone = unbound
     float deadzone = 0.0f;          // radial dead zone for controller sticks, 0..0.9
     bool invert_camera_y = false;   // right stick Y, keyboard and controller
+    Prompts prompts = Prompts::kAuto; // appearance only: never rewrites bindings
     static Mapping defaults();
     bool operator==(const Mapping&) const = default;
 };

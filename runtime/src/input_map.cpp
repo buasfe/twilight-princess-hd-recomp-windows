@@ -439,9 +439,10 @@ std::string to_json(const Mapping& m) {
         o += "    " + quote(action_id(a)) + ": " + (m.pad[a] == kPadNone ? std::string("null") : quote(pad_id(m.pad[a])));
         o += a + 1 < kActionCount ? ",\n" : "\n";
     }
-    char opt[160];
-    snprintf(opt, sizeof opt, "  },\n  \"options\": {\n    \"stick_deadzone\": %.3g,\n    \"invert_camera_y\": %s\n  }\n}\n",
-             m.deadzone, m.invert_camera_y ? "true" : "false");
+    char opt[240];
+    static const char* prompt_ids[] = {"auto", "original", "xbox", "playstation", "keyboard"};
+    snprintf(opt, sizeof opt, "  },\n  \"options\": {\n    \"stick_deadzone\": %.3g,\n    \"invert_camera_y\": %s,\n    \"button_prompts\": \"%s\"\n  }\n}\n",
+             m.deadzone, m.invert_camera_y ? "true" : "false", prompt_ids[std::clamp(int(m.prompts),0,4)]);
     return o + opt;
 }
 
@@ -488,6 +489,10 @@ bool from_json(const std::string& text, Mapping& out, std::string* error) {
         if (const Json* d = op->get("stick_deadzone"); d && d->type == Json::Num)
             m.deadzone = std::clamp((float)d->n, 0.0f, 0.9f);
         if (const Json* i = op->get("invert_camera_y"); i && i->type == Json::Bool) m.invert_camera_y = i->b;
+        if (const Json* p = op->get("button_prompts"); p && p->type == Json::Str) {
+            static const char* ids[] = {"auto", "original", "xbox", "playstation", "keyboard"};
+            for (int n=0;n<5;++n) if (p->s == ids[n]) m.prompts = Mapping::Prompts(n);
+        }
     }
     out = m;
     if (error) *error = warn;

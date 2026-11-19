@@ -4,6 +4,7 @@
 #include "mouse_sdl.h"
 #include "../input.h"
 #include "../input_map.h"
+#include "../button_prompts.h"
 #include "../mods/builtin.h"
 #include "../motion/motion.h"
 #include "../rumble.h"
@@ -32,6 +33,7 @@ static PadState g_pad;
 static float g_values[input_map::kPadCount]={};
 static bool g_touch=false;static float g_tx=0,g_ty=0;
 static std::map<SDL_JoystickID,SDL_Gamepad*> g_controllers;
+static std::map<SDL_JoystickID,std::array<float,input_map::kPadCount>> g_prompt_previous;
 static std::map<SDL_JoystickID,overlay::ReleaseGate> g_release_gates;
 static std::set<SDL_JoystickID> g_rumble_controllers;  // the ones that have a rumble motor
 static SDL_Window* g_prompt_window=nullptr;
@@ -301,10 +303,24 @@ static void sensor_event(const SDL_GamepadSensorEvent& e){
  auto a=g_accel.find(e.which);if(a==g_accel.end())return;
  motion::controller_sample((uint64_t)e.which,e.sensor_timestamp,e.data,a->second.data());
 }
+static void identify_controller(SDL_JoystickID id,SDL_Gamepad* pad){
+  using F=button_prompts::Family;
+  F family=F::Unknown;
+  // SDL's physical face labels also cover supported Nintendo/PlayStation mappings whose
+  // hardware type is unknown. Never infer the physical pad behind a virtual Xbox device.
+  switch(SDL_GetGamepadButtonLabel(pad,SDL_GAMEPAD_BUTTON_SOUTH)){
+   case SDL_GAMEPAD_BUTTON_LABEL_A:family=F::Xbox;break;
+   case SDL_GAMEPAD_BUTTON_LABEL_CROSS:family=F::PlayStation;break;
+   case SDL_GAMEPAD_BUTTON_LABEL_B:family=F::Nintendo;break;
+   default:break;
+  }
+  button_prompts::connected({id,family,SDL_IsJoystickVirtual(id),SDL_GetGamepadName(pad)?SDL_GetGamepadName(pad):"Controller"});
+}
 static void open_controller(SDL_JoystickID id){
  std::lock_guard lk(g_pads_mu);
  if(g_controllers.contains(id))return;
  if(auto* pad=SDL_OpenGamepad(id)){g_controllers[id]=pad;
+  identify_controller(id,pad);
   // asking for a rumble of zero intensity also tells us whether the controller has a motor
   if(SDL_RumbleGamepad(pad,0,0,0))g_rumble_controllers.insert(id);
   if(g_sensors_on)set_sensors_locked(pad,true);}
@@ -365,9 +381,11 @@ static void post_test_keys(){
  }
 }
 void handle_event(const SDL_Event& event){
+ if(event.type==SDL_EVENT_GAMEPAD_REMOVED){button_prompts::disconnected(event.gdevice.which);g_prompt_previous.erase(event.gdevice.which);}
  if(overlay::captures())mods::update_mouse();
  else if(mods::handle_mouse_event(event))return;
  if(event.type==SDL_EVENT_GAMEPAD_ADDED&&!getenv("WWHD_NO_CONTROLLERS"))open_controller(event.gdevice.which);
+ if(event.type==SDL_EVENT_GAMEPAD_REMAPPED){std::lock_guard lk(g_pads_mu);auto it=g_controllers.find(event.gdevice.which);if(it!=g_controllers.end())identify_controller(it->first,it->second);}
  if(event.type==SDL_EVENT_GAMEPAD_REMOVED){std::lock_guard lk(g_pads_mu);auto i=g_controllers.find(event.gdevice.which);if(i!=g_controllers.end()){SDL_CloseGamepad(i->second);g_controllers.erase(i);}g_rumble_controllers.erase(event.gdevice.which);g_rumble_sent.erase(event.gdevice.which);g_accel.erase(event.gdevice.which);g_sensor_seen.erase(event.gdevice.which);g_sensor_kick.erase(event.gdevice.which);motion::controller_gone(event.gdevice.which);}
  if(event.type==SDL_EVENT_GAMEPAD_SENSOR_UPDATE){g_sensor_seen[event.gsensor.which]=SDL_GetTicks();if(!getenv("WWHD_NO_HOST_INPUT")&&!overlay::blocks_input())sensor_event(event.gsensor);return;}
  if(event.type==SDL_EVENT_WINDOW_FOCUS_LOST)release_keys();
@@ -425,11 +443,15 @@ void update(){
   put(kPadLT,std::max(0.f,SDL_GetGamepadAxis(pad,SDL_GAMEPAD_AXIS_LEFT_TRIGGER)/32767.f));put(kPadRT,std::max(0.f,SDL_GetGamepadAxis(pad,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)/32767.f));
   auto stick=[&](SDL_GamepadAxis ax,SDL_GamepadAxis ay,int up,int down,int left,int right){float x=SDL_GetGamepadAxis(pad,ax)/32768.f,y=SDL_GetGamepadAxis(pad,ay)/32768.f;put(right,std::max(x,0.f));put(left,std::max(-x,0.f));put(up,std::max(-y,0.f));put(down,std::max(y,0.f));};
   stick(SDL_GAMEPAD_AXIS_LEFTX,SDL_GAMEPAD_AXIS_LEFTY,kPadLSUp,kPadLSDown,kPadLSLeft,kPadLSRight);stick(SDL_GAMEPAD_AXIS_RIGHTX,SDL_GAMEPAD_AXIS_RIGHTY,kPadRSUp,kPadRSDown,kPadRSLeft,kPadRSRight);
+  auto& previous=g_prompt_previous[id];
+  for(int p=1;p<kPadCount;++p)if(d[p]>0.55f&&previous[p]<=0.55f){button_prompts::activity(id);break;}
+  std::copy(std::begin(d),std::end(d),previous.begin());
   for(int p=0;p<kPadCount;++p)v[p]=std::max(v[p],d[p]);  // overlay navigation stays raw
   g_release_gates[id].filter(d,overlay::captures());
   for(int p=0;p<kPadCount;++p)game[p]=std::max(game[p],d[p]);
  }
  std::erase_if(g_release_gates,[](const auto& g){return !g_controllers.contains(g.first);});
+ std::erase_if(g_prompt_previous,[](const auto& g){if(g_controllers.contains(g.first))return false;button_prompts::disconnected(g.first);return true;});
  auto state=input_map::controller_state(input_map::current(),game);std::lock_guard lk(g_mu);std::copy(std::begin(v),std::end(v),g_values);g_pad=state;
  if(!overlay::blocks_input()&&!getenv("WWHD_NO_HOST_INPUT"))motion::poll_recalibrate(game,g_keys);
 }

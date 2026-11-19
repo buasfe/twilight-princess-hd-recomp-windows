@@ -1,4 +1,5 @@
 #include "mods/cemu_pack.h"
+#include "button_glyphs.h"
 // Guest surfaces backed by Vulkan images. LatteAddrLib supplies guest tiling geometry.
 #include "backend.h"
 #include "buffer_cache.h"
@@ -299,7 +300,9 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler) {
         addr &= ~0x700u;
     }
     SurfaceDesc d;
-    d.addr = addr;
+    // TP's cached UI materials keep native addresses. Resolve only registered prompt sheets;
+    // their generated variants retain the exact native format, tiling and dimensions.
+    d.addr = isDepthSampler ? addr : button_glyphs::texture_image(addr);
     d.mipAddr = mipAddr;
     d.width = width;
     d.height = height;

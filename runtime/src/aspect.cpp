@@ -6,6 +6,7 @@
 // targets get as much wider or taller (gfx/metal_surfaces.mm), so the game draws the new shape and lays out its
 // HUD to its edges.
 #include "aspect.h"
+#include "button_glyphs.h"
 
 #include <algorithm>
 #include <atomic>
@@ -233,6 +234,7 @@ void draw_wide(Cpu* c, uint32_t pane, uint32_t ctx, uint32_t parent, Saved& save
 
 extern "C" void hook_02B34334(Cpu* c) {
     const uint32_t pane = c->r[3], ctx = c->r[4], parent = parent_of(pane);
+    if(!parent)button_glyphs::refresh(c);
     Saved saved;
     interp::blend_pane(pane, saved);  // between the last two steps on hold passes (interp.cpp); a root's alpha fades whole screens
     if (!parent) {  // a screen's root
