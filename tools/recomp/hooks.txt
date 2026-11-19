@@ -1,0 +1,60 @@
+# Runtime hooks into Zelda.rpx (address = function entry; "@ADDR" = instruction site, runs before it).
+@02AF0EDC  # main01: top of the frame loop (interp.cpp: save states, hold passes)
+029196A0  # dPeekZ_c::peekData: depth peeks answered from GPU readbacks (peekz.cpp)
+02AEA3E4  # bloom_c::draw: bloom strength (look.cpp)
+02A31164  # dMeter2Draw_c::draw: the HUD shown or hidden (look.cpp)
+02BDAB7C  # GXSetFog's state write: distant fog (look.cpp)
+02B34334  # J2DPane::draw: the HUD to the edges and menus at 16:9 on wider screens (aspect.cpp)
+02A95A78  # CPaneMgr::getGlobalVtx: a centered menu pane's place (aspect.cpp)
+02B3420C  # J2DPane's cull test for pictures drawn at a place: the screen's edges (aspect.cpp)
+02B38B94  # J2DPicture::draw(x, y, w, h): the HUD's item counts beside their items on a wide TV (aspect.cpp)
+# frame interpolation (interp.cpp): camera, models, the play scene's draw, and what hold passes skip
+028E13CC  # camera_draw
+02B5CF50  # J3DModel::viewCalc
+02B5C544  # J3DModel::calcMaterial
+02B5C2DC  # J3DModel::entry: material animations of some models
+02B5D320  # J3DModelData::simpleCalcMaterial: material animations of models drawn by particle emitters
+02B58040  # J3DMaterialAnm::calc
+02B17008  # JPAEmitterManager::draw
+02AC08B4  # dScnPly_Draw
+02AF0A98  # main01: pad read
+02AD9F9C  # main01: audio
+02003ED8  # main01
+02AF09B8  # main01
+02AFA7A0  # main01: HD systems
+02AD6EB0  # fpcDt_Handler
+02AD9664  # fpcPi_Handler
+02AD6C78  # fpcCt_Handler
+02AD752C  # fpcEx_Handler
+0290DD38  # fpcM_Management, after execute
+02ACD0A8  # fapGm_After
+02BEF838  # cCt_Counter
+02B520C4  # J3DFrameCtrl::update (in some actors' draw)
+02AEAD04  # mDoGph_gInf_c::calcFade (in the painter)
+02919F48  # dDlst_list_c::calcWipe (in the painter)
+02A9D7F8  # dPa_control_c::calcMenu (in the painter)
+02B9F530  # JUTFader::control: the scene change fade (from the display's end of frame)
+02B9F63C  # JUTFader::draw (HD's: alpha from the count)
+02902B4C  # dComIfG_Ccsp()->Move()
+028C2AB0  # dComIfG_Bgsp().ClrMoveFlag()
+02ACC800  # vibration Run
+0290CDAC  # daSus_c::execute
+028C2C00  # dComIfG_Bgsp().Move()
+02A9D6E4  # particle calc 3D
+02A9D41C  # particle calc 2D
+02AD5B3C  # fopScnM_ChangeReq
+# posture combat (mods/posture.cpp)
+0206B164  # daAlink_c::procGuardSlipInit: a blow on Link's shield
+0206AA24  # daAlink_c::procGuardBreakInit: a guard-breaking blow
+02903E80  # cc_at_check: an enemy hit
+02903934  # def_se_set: an enemy's guard took a blow
+# built-in mods (mods/builtin.cpp)
+02A58584  # jmessage_tSequenceProcessor::do_begin: fast text
+@02941068  # after the mirror flag's store (Hero Mode): unmirrored Hero Mode
+@029481B0  # after the mirror flag's store (Hero Mode): unmirrored Hero Mode
+028D9360  # dCamera_c::updatePad: direct camera
+0205E1D8  # daAlink_c::setItemMatrix: big head
+0201F128  # daAlink_c::setSingleAnime: faster rolls and climbing
+0202BA48  # daAlink_c::setWaterInAnmRate: faster climbing (each step's rate)
+0204D094  # daAlink_c::procFrontRollInit: faster rolls (Link's speed)
+0203ABD0  # daAlink_c::checkCutLargeTurnState: great spin
