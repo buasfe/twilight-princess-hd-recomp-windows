@@ -2,6 +2,7 @@
 // WWHD_AUDIO_DUMP=file.wav additionally records everything pushed by the game.
 // WWHD_NO_AUDIO=1 skips opening the device (the mix still runs and can be dumped).
 #include "audio_out.h"
+#include "title_movie.h"
 
 #if defined(__APPLE__) && !defined(WWHD_SDL_HOST)
 #include <AudioToolbox/AudioToolbox.h>
@@ -66,6 +67,11 @@ void write_wav_header() {
 void pull(int16_t* out,uint32_t frames) {
     uint32_t r = g_read.load(std::memory_order_relaxed), w = g_write.load(std::memory_order_acquire);
     if (g_flush.exchange(false)) r = w;
+    if (title_movie::active()) {
+        memset(out, 0, frames * 4);
+        g_read.store(w, std::memory_order_release);
+        return;
+    }
     uint32_t avail = w - r, n = std::min<uint32_t>(avail, frames);
     for (uint32_t i = 0; i < n; i++) {
         uint32_t idx = (r + i) & (kCapacity - 1);

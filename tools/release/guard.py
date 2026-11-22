@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Release guard: fails if a release artifact contains anything derived from the game or any key.
 
-usage: guard.py ARTIFACT.zip|DIR [...]
+usage: guard.py [--windows-setup] ARTIFACT.zip|DIR [...]
 
 Release packages may contain only this project's runtime, tools and installer (plus third-party
 licenses). This check rejects, by name and by content:
@@ -80,10 +80,59 @@ def check_entry(name, data, problems):
         problems.append("%s: contains recompiled game functions" % name)
 
 
-def scan(path):
+WINDOWS_REQUIRED = {
+    "Twilight Princess HD.exe", "tools/bin/wwhd-extract.exe", "tools/python/python.exe",
+    "tools/installer/setup.py", "tools/installer/toolchains.json", "sdk/manifest.json",
+    "portable.txt", "LICENSE", "SOURCE.txt", "CREDITS.md",
+}
+WINDOWS_BINARIES = {"Twilight Princess HD.exe", "tools/bin/wwhd-extract.exe", "sdk/runtime/SDL3.dll"}
+
+
+def check_windows_layout(names, problems):
+    manifests = [n for n in names if n == "sdk/manifest.json" or n.endswith("/sdk/manifest.json")]
+    if len(manifests) != 1:
+        problems.append("expected one Windows setup manifest")
+        return
+    prefix = manifests[0][:-len("sdk/manifest.json")]
+    if prefix.count("/") > 1:
+        problems.append("Windows package is nested too deeply")
+    entries = {n[len(prefix):] for n in names if n.startswith(prefix)}
+    for missing in sorted(WINDOWS_REQUIRED - entries):
+        problems.append("missing Windows setup file: " + missing)
+    for name in names:
+        if not name.startswith(prefix):
+            problems.append("file outside the Windows setup folder: " + name)
+    for name in sorted(entries):
+        if name.startswith(("data/", "work/", "save/")):
+            problems.append("local setup data in the Windows package: " + name)
+        ext = os.path.splitext(name)[1].lower()
+        if name.startswith("tools/python/") or name in WINDOWS_BINARIES:
+            continue
+        if ext in {".exe", ".dll", ".pyd", ".sys", ".com", ".zip", ".7z", ".tar", ".gz", ".bin", ".dat", ".log", ".dump", ".pdb"}:
+            problems.append("unexpected binary or archive in the Windows setup: " + name)
+        if ext in {".a", ".lib", ".o", ".obj", ".res"}:
+            if not re.fullmatch(r"sdk/(?:lib/[^/]+\.(?:a|lib)|obj/(?:runtime_src_[^/]+\.(?:obj|o)|generated_wwhd\.rc\.res|generated_build_info\.cpp\.obj))", name):
+                problems.append("unexpected SDK binary: " + name)
+
+
+def scan(path, windows_setup=False):
     problems, count, python = [], 0, set()
+    names, folded = set(), set()
 
     def entry(name, data):
+        name = name.replace("\\", "/")
+        if windows_setup:
+            if any(not part or part in (".", "..") or ":" in part or part.endswith((" ", "."))
+                   for part in name.split("/")):
+                problems.append("unsafe Windows package path: " + name)
+            if name.casefold() in folded:
+                problems.append("duplicate Windows package path: " + name)
+            names.add(name)
+            folded.add(name.casefold())
+            if data.startswith(b"MZ") != name.lower().endswith((".exe", ".dll", ".pyd")):
+                problems.append("unexpected Windows executable header or extension: " + name)
+            if data.startswith((b"\x7fELF", b"WUX0", b"ZArchive")):
+                problems.append("unexpected executable or game archive header: " + name)
         check_python(name, data, python, problems)
         check_entry(name, data, problems)
 
@@ -101,6 +150,8 @@ def scan(path):
                     continue
                 entry(info.filename, z.read(info))
                 count += 1
+    if windows_setup:
+        check_windows_layout(names, problems)
     if python:
         with open(PYTHON_FILES) as f:
             missing = sorted(set(json.load(f)["files"]) - python)
@@ -110,11 +161,15 @@ def scan(path):
 
 
 def main():
-    if len(sys.argv) < 2:
+    paths = sys.argv[1:]
+    windows_setup = bool(paths and paths[0] == "--windows-setup")
+    if windows_setup:
+        paths = paths[1:]
+    if not paths:
         sys.exit(__doc__)
     bad = False
-    for p in sys.argv[1:]:
-        problems, count = scan(p)
+    for p in paths:
+        problems, count = scan(p, windows_setup=windows_setup)
         if problems:
             bad = True
             print("REJECTED %s (%d files):" % (p, count))

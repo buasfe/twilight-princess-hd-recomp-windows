@@ -8,10 +8,10 @@
 
 ## How this was made
 
-Asad's additions were developed with AI assistance from Claude. The Windows Edition used Codex assistance for development and testing.
+Asad's additions were developed with AI assistance from Claude. Windows Edition used extensive Codex assistance for coding and debugging. The maintainer tested gameplay, controller behaviour and rendering on Windows and used those results to guide development.
 
 ## Source provenance
 
-The Windows preview source is based on AsadSi's upstream history at `1f208ec` and the Windows controller baseline `723a832`. The original development history lives in the upstream repository and the maintainer's local Git branches. The preview starts with an audited source snapshot. [Upstream Twilight Princess HD history](https://github.com/AsadSi/twilight-princess-hd-recomp/commits/main/)
+The anniversary preview source is based on AsadSi's upstream history at `1f208ec` and the Windows controller baseline `723a832`. The public Windows history uses reviewed source snapshots. The original development history lives in the upstream repository and the maintainer's local Git branches. [Upstream Twilight Princess HD history](https://github.com/AsadSi/twilight-princess-hd-recomp/commits/main/)
 
 The `runtime/third_party/` folders retain the notices for Cemu, Dear ImGui, fmt, metal-cpp and xxHash. CMake fetches SDL3, glslang, zlib, LZ4 and zstd from their pinned upstream releases. Each dependency retains its own licence.

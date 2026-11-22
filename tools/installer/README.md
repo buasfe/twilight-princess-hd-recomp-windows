@@ -8,7 +8,11 @@ instructions are in the main README ("Install with the setup app").
 
 ## Portable releases
 
-A release folder contains `portable.txt`. Then everything stays in `<release>/data`:
+A release folder contains `portable.txt`. The installation defaults to `<release>/data`. On Windows,
+setup can build in a separate empty folder. It records the new folder in `setup-location.json` only
+after a successful build. A failed build can be retried in that folder during the same setup session.
+Choosing a different destination leaves the previous installation and its saves in place.
+The paths below are relative to the default installation:
 
 | path | what |
 |---|---|
@@ -100,12 +104,10 @@ installations and for `--data-dir`/`WWHD_DATA_DIR`, and a newer release brings i
 (`gui/console_setup_win.cpp`); `--console-setup ARGS` (the first argument; used by
 `tools\Setup in a console window.bat`) runs `setup.py ARGS` in the console it was started from. If
 `tools\python` is missing, both say that the release is incomplete and should be unzipped again. The program
-contains no download code and starts no script host; `setup.py` uses the Windows API through ctypes for its
-file dialogs and shortcuts. Until 0.2.6 a PowerShell script started with `-ExecutionPolicy Bypass` removed
-the "mark of the web" from every file in the release folder and downloaded Python; antivirus heuristics read
-that as a dropper (issue #58). Nothing needs the mark removed: SmartScreen asks once for `Twilight Princess HD.exe`
-and remembers "Run anyway", and programs started with CreateProcess (Python, the extractor, the compiler,
-the game) and DLLs are not checked for it.
+contains no download code and starts no script host. `setup.py` uses the Windows API through ctypes for
+file dialogs and shortcuts and verifies pinned compiler downloads with SHA-256.
+Use the checksum and source link from the release when verifying the package.
+
 
 ## Linux on x86-64 and arm64
 

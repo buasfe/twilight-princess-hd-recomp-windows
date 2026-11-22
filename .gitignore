@@ -68,3 +68,6 @@ headstart.bin
 *.tsv
 # local coordination board
 /task.md
+
+# Local installer QA fixtures and screenshots
+/.setup-validation/

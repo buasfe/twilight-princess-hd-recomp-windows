@@ -7,8 +7,13 @@
 #include <cstdlib>
 #include "input.h"
 #include "input_map.h"
+#include "button_prompts.h"
 #include "rumble.h"
+#include "title_movie.h"
 #include "platform/input_sdl.h"
+#ifdef _WIN32
+namespace title_movie { uint32_t filter_skip_buttons(uint32_t held) { return held; } }
+#endif
 static int savedSlot=0, loadedSlot=0, saveRequests=0, loadRequests=0;
 namespace ss { void request_save(int slot){savedSlot=slot;++saveRequests;} void request_load(int slot){loadedSlot=slot;++loadRequests;} }
 static int graphicsRequests=0; static char graphicsKey=0;
@@ -93,6 +98,7 @@ int main(){
  desc.Rumble=[](void*,Uint16 low,Uint16 high){motorLow=low;motorHigh=high;++motorCalls;return true;};
  const SDL_JoystickID padId=SDL_AttachVirtualJoystick(&desc);assert(padId);
  for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);  // SDL_EVENT_GAMEPAD_ADDED opens it
+ assert(button_prompts::active_device().id==padId&&button_prompts::active_device().virtual_device);
  SDL_ShowWindow(game);for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
  const bool focused=SDL_GetKeyboardFocus()!=nullptr;  // the dummy driver may give no window the keyboard
  // SDL axis signs, measured Xbox drift, radial dead zone, and upstream #153 release handling.
@@ -121,8 +127,10 @@ int main(){
  auto* second=SDL_OpenJoystick(secondId);assert(second);
  assert(SDL_SetJoystickVirtualButton(second,SDL_GAMEPAD_BUTTON_SOUTH,true));
  assert(poll().buttons&input::kA);
+ assert(button_prompts::active_device().id==secondId); // meaningful last input chooses prompts
  SDL_CloseJoystick(second);assert(SDL_DetachVirtualJoystick(secondId));
  for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
+ assert(button_prompts::active_device().id==padId); // disconnected active device falls back
  assert(!(poll().buttons&input::kA));
  button(SDL_GAMEPAD_BUTTON_SOUTH,false);axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,0);
  for(auto a:{SDL_GAMEPAD_AXIS_LEFTX,SDL_GAMEPAD_AXIS_LEFTY,SDL_GAMEPAD_AXIS_RIGHTX,SDL_GAMEPAD_AXIS_RIGHTY})axis(a,0);

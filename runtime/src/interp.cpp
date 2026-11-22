@@ -14,6 +14,7 @@
 // effects, a 2D screen's root, 2D texture and color animation) moves at 30 Hz.
 // The addresses come from the decomp's structure (docs/brief.md, 60 fps groundwork).
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
@@ -25,6 +26,7 @@
 #include "aspect.h"
 #include "gx2/gx2.h"
 #include "interp.h"
+#include "title_movie.h"
 #include "mods/builtin.h"
 #include "mods/mods.h"
 #include "mods/packages.h"
@@ -224,6 +226,14 @@ void blend_into(uint32_t at, const uint32_t* a, const uint32_t* b, uint32_t mats
     for (uint32_t i = 0; i < mats * 12; i++) g[i] = fb(lerp(bf(a[i]), bf(b[i]), t));
 }
 
+constexpr uint32_t kReinCapacity = 75;
+struct ReinPose {
+    uint32_t material = 0, points = 0, count = 0;
+    uint64_t pass = 0;
+    std::array<uint32_t, kReinCapacity * 3> xyz{};
+};
+ReinPose g_reins;
+
 // JPABaseParticle: position +0x00 (global, set by the particle calc), age +0x80; a JPANode holds it at +0x08
 // (next node +0x04)
 struct PtclPrev {
@@ -238,6 +248,7 @@ struct PanePrev {
     uint8_t alpha = 0;
 };
 std::unordered_map<uint32_t, PanePrev> g_panes;
+bool g_reused_pane_screen = false; // scoped to screens that reposition shared panes between draws
 // a material animation's frame in one model, keyed by model << 32 | animation
 struct AnmPrev {
     uint64_t pass = 0;
@@ -361,6 +372,55 @@ static void restore_models() {
     if (g_models.size() > 4096) g_models.clear();  // models are freed with their actors: drop old records
 }
 
+// daHorse::draw builds a camera-facing ribbon from world-space control points.
+// Generate its vertices at the same fraction as the rider and horse models.
+// The generated vertices survive the call. The game's control points do not change.
+extern "C" void f_02AE5F9C_orig(Cpu*);
+extern "C" void hook_02AE5F9C(Cpu* c) {
+    using namespace interp;
+    if (c->lr != 0x02415B08) return f_02AE5F9C_orig(c);
+    if (!g_on || !g_n) {
+        g_reins.material = 0;
+        return f_02AE5F9C_orig(c);
+    }
+    const uint32_t material = c->r[3], count = c->r[4];
+    if (!material || ld16(material + 0x30) != 1 || count < 2 ||
+        count > kReinCapacity || count > ld16(material + 0x32))
+        return f_02AE5F9C_orig(c);
+    const uint32_t line = ld32(material + 0x38);
+    const uint32_t points = line ? ld32(line) : 0;
+    if (!points) return f_02AE5F9C_orig(c);
+
+    if (record_pass()) {
+        g_reins.material = material;
+        g_reins.points = points;
+        g_reins.count = count;
+        g_reins.pass = g_records;
+        read_words(points, count * 3, g_reins.xyz.data());
+        return f_02AE5F9C_orig(c);
+    }
+    if (g_reins.pass + 1 != g_records || g_reins.material != material ||
+        g_reins.points != points || g_reins.count != count)
+        return f_02AE5F9C_orig(c);
+
+    std::array<uint32_t, kReinCapacity * 3> exact, blended;
+    read_words(points, count * 3, exact.data());
+    const float t = pass_t();
+    for (uint32_t i = 0; i < count * 3; ++i) {
+        const float before = bf(g_reins.xyz[i]), after = bf(exact[i]);
+        const float delta = after - before;
+        // Use the exact pose on cuts or abrupt point changes.
+        if (!std::isfinite(delta) || std::fabs(delta) > 300)
+            return f_02AE5F9C_orig(c);
+        blended[i] = fb(before + delta * t);
+    }
+    memcpy(mem::ptr(points), blended.data(), count * 12);
+    f_02AE5F9C_orig(c);
+    memcpy(mem::ptr(points), exact.data(), count * 12);
+}
+
+void interp::reset_rein_history() { g_reins.material = 0; }
+
 // What calls each animated material's J3DMaterialAnm::calc (below), with the model (or, for static models, the
 // model data) it is for: J3DModel::calcMaterial(J3DModel*) in the draw, J3DModel::entry(J3DModel*), and
 // J3DModelData::simpleCalcMaterial(J3DModelData*, u16, Mtx) for models drawn by particle emitters (02AA28C0: Stallord's
@@ -470,7 +530,7 @@ static uint32_t alpha_at(uint32_t pane) {
 }
 
 void interp::blend_pane(uint32_t pane, std::vector<std::pair<uint32_t, uint32_t>>& saved) {
-    if (!g_on) return;
+    if (!g_on || g_reused_pane_screen) return;
     if (!g_hold) {
         PanePrev& p = g_panes[pane];
         p.pass = g_records;
@@ -497,6 +557,29 @@ void interp::blend_pane(uint32_t pane, std::vector<std::pair<uint32_t, uint32_t>
         st8(at, (uint8_t)std::lround(lerp(p.alpha, ld8(at), t)));
     }
 }
+
+// J2DScreen::draw. Two horse-meter calls draw individual spurs using one
+// screen. Dialogue repositions its glow screen for each character. A pane's
+// address cannot distinguish those draws, so let the game supply their exact
+// positions and alpha on both passes. Other screens still use pane history.
+extern "C" void f_02B433DC_orig(Cpu* c);
+extern "C" void hook_02B433DC(Cpu* c) {
+    using namespace interp;
+    const uint32_t caller = c->lr;
+    const bool glow = caller == 0x02A83888;
+    const auto draw = glow ? aspect::draw_dialogue_glow : f_02B433DC_orig;
+    if (!g_on || (caller != 0x02A4D3C4 && caller != 0x02A4D43C && !glow))
+        return draw(c);
+    const bool outer = std::exchange(g_reused_pane_screen, true);
+    draw(c);
+    g_reused_pane_screen = outer;
+}
+
+// dMsgScrnLight_c::draw adds 1 or the caller's rate to a character's
+// animation frame. Keep drawing the glow on a hold pass without advancing
+// its transform and colour animations again.
+extern "C" void site_02A83C30(Cpu* c) { if (g_hold) c->f[12].ps0 = 0; }
+extern "C" void site_02A83D94(Cpu* c) { if (g_hold) c->f[31].ps0 = 0; }
 
 // ---------------------------------------------------------------- the pass structure
 // Hold passes skip the step's logic: in main01's loop, the pad read, audio and HD systems; in fpcM_Management,
@@ -626,6 +709,7 @@ extern "C" void hook_02AC08B4(Cpu* c) {  // dScnPly_Draw
 namespace warp { void service(Cpu* c); }  // warp.cpp
 extern "C" void site_02AF0EDC(Cpu* c) {
     using namespace interp;
+    title_movie::at_guest_frame();
     if (g_hold && g_phase == g_n) g_records++;  // the record pass just ended
     g_passes++;
     if (!g_hold) g_wide_zoom = ld8(0x1012B3C3);  // g_hold is still the pass that ended

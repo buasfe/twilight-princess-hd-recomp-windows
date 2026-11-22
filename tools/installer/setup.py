@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Twilight Princess HD (native macOS port): first-run setup, repair and update.
+"""Twilight Princess HD: first-run setup, repair and update.
 
 The release contains no game files. This program builds the game on your machine from your own
 disc dump:
@@ -29,6 +29,7 @@ Keys can also come from the WIIU_COMMON_KEY environment variable / IMAGE.key nex
 Keys are never printed, logged or stored.
 """
 import argparse
+import copy
 import getpass
 import glob
 import hashlib
@@ -100,7 +101,10 @@ class Log:
 
     def open(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.f = open(path, "a", encoding="utf-8")
+        new_file = open(path, "a", encoding="utf-8")
+        if self.f:
+            self.f.close()
+        self.f = new_file
         self.write("==== setup %s, %s, Python %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), sys.platform,
                                                     sys.version.split()[0]))
 
@@ -129,6 +133,10 @@ class Protocol:
 
 
 GUI = None  # Protocol when running under the graphical installer
+
+
+def tool_process_flags():
+    return subprocess.CREATE_NO_WINDOW if IS_WIN and (GUI or not sys.stdout.isatty()) else 0
 
 
 def say(text=""):
@@ -192,7 +200,8 @@ def human(n):
 def run_logged(cmd, cwd=None, env=None, what="command"):
     """Runs a command with its output going to the log; raises SetupError with the output tail."""
     LOG.write("$ " + " ".join(cmd))
-    p = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    p = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       creationflags=tool_process_flags())
     out = p.stdout.decode("utf-8", "replace")
     LOG.write(out)
     if p.returncode != 0:
@@ -488,8 +497,28 @@ def ask_key(ui, what, hint):
 # locations
 
 
+def location_file():
+    return os.path.join(PKG, "setup-location.json")
+
+
+def remember_location(data_dir):
+    # Commit the launcher's preference only after the new installation has succeeded.
+    tmp = location_file() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"data_dir": rel_to_data(data_dir, PKG)}, f, ensure_ascii=True)
+    os.replace(tmp, location_file())
+
+
 def default_data_dir():
     if PORTABLE:
+        if IS_WIN:
+            try:
+                with open(location_file(), encoding="utf-8") as f:
+                    location = json.load(f)["data_dir"]
+                if isinstance(location, str) and location:
+                    return os.path.normpath(os.path.join(PKG, location))
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         return os.path.join(PKG, "data")
     if IS_MAC:
         return os.path.expanduser("~/Library/Application Support/tphd")
@@ -497,6 +526,19 @@ def default_data_dir():
         return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local"), "TPHD")
     base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     return os.path.join(base, "tphd")
+
+
+def check_install_location(path, active_dir, attempted=None):
+    """Allow an empty destination or the setup session's own unfinished destination."""
+    if not path or not os.path.isabs(path):
+        raise SetupError("Choose an existing empty folder for the installation.")
+    path = os.path.realpath(path)
+    if os.path.normcase(path) == os.path.normcase(os.path.realpath(active_dir)):
+        raise SetupError("This is the current installation. Choose a separate empty folder.")
+    with os.scandir(path) as entries:
+        if path != attempted and next(entries, None) is not None:
+            raise SetupError("This folder already contains files. Choose or create an empty folder.")
+    return path
 
 
 def free_space(path):
@@ -572,7 +614,7 @@ def ensure_xcode_clt(ui):
     say("  Command Line Tools installed.")
 
 
-def get_toolchain(name, data_dir, ui):
+def get_toolchain(name, data_dir, ui, *, placeholder=False):
     tcs = load_toolchains()["toolchains"]
     if name not in tcs:
         raise SetupError("this release needs an unknown toolchain %r (damaged download?)" % name)
@@ -585,15 +627,20 @@ def get_toolchain(name, data_dir, ui):
     os.makedirs(root, exist_ok=True)
     tdir = os.path.join(root, tc["dir"])
     marker = os.path.join(tdir, ".wwhd-toolchain")
-    if os.environ.get("WWHD_TOOLCHAIN_DIR"):  # CI: a toolchain already unpacked from the same pinned archive
-        tdir = os.environ["WWHD_TOOLCHAIN_DIR"]
+    # Only placeholder smoke builds can override the compiler with an unpacked developer toolchain.
+    override = os.environ.get("WWHD_TOOLCHAIN_DIR") if placeholder else None
+    if override:
+        tdir = override
     elif not (os.path.isfile(marker) and open(marker).read().strip() == tc["sha256"]):
         need = tc.get("size", 0) * 6
         if free_space(root) < need:
             raise SetupError("not enough free disk space for the compiler (%s needed)" % human(need))
-        say("  Getting the compiler (%s, %s download, once)." % (tc["dir"], human(tc.get("size", 0))))
         arc = os.path.join(root, os.path.basename(tc["url"].split("?")[0]))
-        download(tc["url"], arc, tc["sha256"], tc.get("size"), "compiler")
+        if os.path.isfile(arc) and file_sha256(arc) == tc["sha256"]:
+            say("  Using the cached compiler archive (SHA-256 verified).")
+        else:
+            say("  Getting the compiler (%s, %s download, once)." % (tc["dir"], human(tc.get("size", 0))))
+            download(tc["url"], arc, tc["sha256"], tc.get("size"), "compiler")
         tmp = os.path.join(root, "unpack.tmp")
         shutil.rmtree(tmp, ignore_errors=True)
         os.makedirs(tmp)
@@ -618,7 +665,7 @@ def get_toolchain(name, data_dir, ui):
     if kind == "llvm-mingw":
         b = os.path.join(tdir, "bin")
         return Toolchain([os.path.join(b, "x86_64-w64-mingw32-clang.exe")], [os.path.join(b, "x86_64-w64-mingw32-clang++.exe")],
-                         [os.path.join(b, "llvm-ar.exe")], rsp=True, desc="llvm-mingw " + tc["dir"])
+                         [os.path.join(b, "llvm-ar.exe")], rsp=True, desc="developer toolchain at " + tdir if override else "llvm-mingw " + tc["dir"])
     if kind == "zig":
         z = os.path.join(tdir, "zig")
         env = dict(os.environ)
@@ -641,7 +688,7 @@ def extractor():
 
 def disc_info(image, keys):
     p = subprocess.run([extractor(), "--keys-stdin", "info", image], input=keys.stdin_blob(), stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE)
+                       stderr=subprocess.PIPE, creationflags=tool_process_flags())
     err = p.stderr.decode("utf-8", "replace").strip()
     LOG.write("wwhd-extract info: exit %d %s" % (p.returncode, err))
     if p.returncode != 0:
@@ -682,7 +729,7 @@ def archive_info(path, title=SUPPORTED_TITLE):
     info: {"titles": [{id, version, folder, files, bytes}], "selected", "title_id", "version", "files", "bytes"}
     (also for problem "wrong_title": what the archive does contain)."""
     p = subprocess.run([extractor()] + (["--title", title] if title else []) + ["info", path], stdin=subprocess.DEVNULL,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=tool_process_flags())
     err = p.stderr.decode("utf-8", "replace").strip()
     LOG.write("wwhd-extract info (archive): exit %d %s" % (p.returncode, err))
     info = {"titles": []}
@@ -902,7 +949,8 @@ def run_extract(image, keys, out, title=None):
         cmd = [extractor(), "--title", title, "--progress", "extract", image, out]
     else:
         cmd = [extractor(), "--keys-stdin", "--progress", "extract", image, out]
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         creationflags=tool_process_flags())
     errbuf = []
     t = threading.Thread(target=lambda: errbuf.append(p.stderr.read()))
     t.start()
@@ -978,9 +1026,17 @@ def recompile(game_dir, gen_dir):
     return n
 
 
+def windows_jobs(cpus, available_bytes):
+    if available_bytes is None:
+        return max(1, min(cpus, 2))
+    gib = 1 << 30
+    return max(1, min(cpus, (available_bytes - 2 * gib) // (2 * gib)))
+
+
 def default_jobs():
     n = os.cpu_count() or 2
     mem = None
+    available = None
     try:
         if IS_MAC:
             mem = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]))
@@ -992,13 +1048,16 @@ def default_jobs():
 
             class MS(ctypes.Structure):
                 _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
-                            ("ullTotalPhys", ctypes.c_ulonglong), ("a", ctypes.c_ulonglong * 6)]
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("other", ctypes.c_ulonglong * 5)]
             ms = MS()
             ms.dwLength = ctypes.sizeof(MS)
-            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
-            mem = ms.ullTotalPhys
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+                available = ms.ullAvailPhys
     except Exception:
         pass
+    if IS_WIN:
+        return windows_jobs(n, available)
     if mem:
         n = min(n, max(1, int(mem / (1.5 * (1 << 30)))))  # about 1.5 GB per compiler process
     return max(1, n)
@@ -1031,7 +1090,8 @@ def compile_gamecode(tc, manifest, gen_dir, obj_dir, jobs):
     def one(src):
         obj = os.path.join(obj_dir, os.path.basename(src) + ".o")
         cmd = tc.cc + flags + ["-c", fwd(src), "-o", fwd(obj)]
-        p = subprocess.run(cmd, env=tc.env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p = subprocess.run(cmd, env=tc.env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           creationflags=tool_process_flags())
         out = p.stdout.decode("utf-8", "replace")
         with lock:
             if p.returncode != 0:
@@ -1059,7 +1119,7 @@ def link_game(tc, manifest, objs, work, out_exe):
         os.remove(lib)
     if tc.rsp:
         rsp = os.path.join(work, "ar.rsp")
-        with open(rsp, "w") as f:
+        with open(rsp, "w", encoding="utf-8") as f:
             f.write("\n".join('"%s"' % fwd(o) for o in objs))
         run_logged(tc.ar + ["rcs", fwd(lib), "@" + fwd(rsp)], env=tc.env, what="archiving the game code")
     else:
@@ -1070,7 +1130,7 @@ def link_game(tc, manifest, objs, work, out_exe):
         args += ["-Wl,-rpath,$ORIGIN"]
     if tc.rsp:
         rsp = os.path.join(work, "link.rsp")
-        with open(rsp, "w") as f:
+        with open(rsp, "w", encoding="utf-8") as f:
             f.write("\n".join('"%s"' % a.replace('"', '\\"') for a in args))
         cmd = tc.cxx + ["@" + fwd(rsp)]
     else:
@@ -1395,8 +1455,10 @@ def write_state(data_dir, state):
             st[k] = rel_to_data(st[k], data_dir)
     if PORTABLE:
         st.pop("data_dir", None)  # it is where install.json is
-    with open(os.path.join(data_dir, "install.json"), "w") as f:
+    dest = os.path.join(data_dir, "install.json")
+    with open(dest + ".tmp", "w") as f:
         json.dump(st, f, indent=1)
+    os.replace(dest + ".tmp", dest)
 
 
 class Ctx:
@@ -1498,7 +1560,7 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
         check_game_version(ctx.game_dir)
 
     begin("compiler")
-    tc = get_toolchain(manifest["toolchain"], data_dir, ui)
+    tc = get_toolchain(manifest["toolchain"], data_dir, ui, placeholder=kind == "gen")
     say("  Using %s." % tc.desc)
 
     game_dir = ctx.game_dir
@@ -1645,7 +1707,7 @@ def main():
 def run(args, ui):
     ctx = Ctx(args)
     version, data_dir, game_dir = ctx.version, ctx.data_dir, ctx.game_dir
-    say("The Legend of Zelda: Twilight Princess HD - native macOS port, setup %s" % version)
+    say("Twilight Princess HD: Recompiled%s setup %s" % (" - Windows Edition" if IS_WIN else "", version))
     say("This release contains no game files. Setup builds the game from your own dump of the game.")
     say("Install folder: %s" % data_dir)
     state = ctx.state()
@@ -1758,7 +1820,8 @@ def run(args, ui):
 #                                           archive: title, folder, bytes, message (which title, why)
 #   check_keys   {image, disc_key_file?, common_key_file?, common_key_hex?}
 #                                        -> title_id, files, bytes  (keys stay in memory for install)
-#   install      {source: image|archive|folder|installed, path?, jobs?}  -> streams step/progress/log, then
+#   location     {path}                  -> validates an empty destination on Windows portable builds
+#   install      {source: image|archive|folder|installed, path?, jobs?, data_dir?}  -> streams step/progress/log, then
 #                                           reply {app, exe, data_dir}
 #   import_save  {path}                  -> message (what was copied, where the earlier save went)
 #   launch       {}                      -> starts the installed game
@@ -1802,6 +1865,8 @@ def gui_main(args):
         GUI.emit({"event": "fatal", "message": str(e)})
         return 1
     session = {"keys": None, "info": None, "image": None}
+    selected_location = ""
+    attempted_location = ""
 
     def hello():
         st = ctx.state()
@@ -1891,7 +1956,19 @@ def gui_main(args):
         session.update(keys=keys, info=info, image=image)
         reply(req, title_id=info.get("title_id"), files=int(info.get("files", 0)), bytes=int(info.get("bytes", 0)))
 
+    def location(req):
+        nonlocal selected_location
+        selected_location = ""
+        if not (IS_WIN and PORTABLE) or args.data_dir:
+            return fail(req, "location", "Setup location is fixed for this launcher session.")
+        try:
+            selected_location = check_install_location(req.get("path"), ctx.data_dir, attempted_location)
+            reply(req, path=selected_location, free_bytes=free_space(selected_location))
+        except (SetupError, OSError) as e:
+            fail(req, "location", str(e))
+
     def do_install(req):
+        nonlocal ctx, attempted_location
         kind = req.get("source")
         if req.get("jobs"):
             ctx.args.jobs = int(req["jobs"])
@@ -1907,18 +1984,36 @@ def gui_main(args):
             source = ("installed", ctx.game_dir)
         else:
             return fail(req, "bad_request", "unknown source")
-        GUI.emit({"event": "plan", "id": req.get("id"), "steps": [{"id": s, "title": STEP_TITLES[s]} for s in plan_steps(kind)]})
+        target_ctx = ctx
         try:
-            state = install(ctx, source, session["keys"], session["info"])
-        except SetupError as e:
+            target = req.get("data_dir")
+            if target:
+                if kind == "installed" or target != selected_location:
+                    raise SetupError("Choose and verify the new installation folder first.")
+                target = check_install_location(target, ctx.data_dir, attempted_location)
+                new_args = copy.copy(ctx.args)
+                new_args.data_dir = target
+                target_ctx = Ctx(new_args)
+                attempted_location = target
+            elif IS_WIN and PORTABLE and kind != "installed" and ctx.installed():
+                raise SetupError("Choose a separate empty folder to keep your working installation and saves.")
+            GUI.emit({"event": "plan", "id": req.get("id"), "steps": [
+                {"id": s, "title": STEP_TITLES[s]} for s in plan_steps(kind)]})
+            state = install(target_ctx, source, session["keys"], session["info"])
+            if target_ctx is not ctx:
+                remember_location(target_ctx.data_dir)
+                ctx = target_ctx
+        except (SetupError, OSError) as e:
             LOG.write("setup stopped: %s" % e)
+            if target_ctx is not ctx:
+                LOG.open(os.path.join(ctx.data_dir, "setup.log"))
             return fail(req, "install", str(e))
         finally:
             session.update(keys=None, info=None)
         tdir = toolchain_dir(ctx.data_dir)
         reply(req, app=state.get("app", ""), exe=state.get("exe", ""), data_dir=ctx.data_dir,
-              game_dir=state.get("game_dir", ""),
-              toolchain_bytes=folder_size(tdir) if os.path.isdir(tdir) else 0)
+              game_dir=state.get("game_dir", ""), log=LOG.f.name if LOG.f else "",
+              free_bytes=free_space(ctx.data_dir), toolchain_bytes=folder_size(tdir) if os.path.isdir(tdir) else 0)
 
     def do_import_save(req):
         try:
@@ -1942,7 +2037,7 @@ def gui_main(args):
         launch(st, ctx.data_dir)
         reply(req)
 
-    handlers = {"probe": probe, "check_keys": check, "install": do_install, "import_save": do_import_save,
+    handlers = {"probe": probe, "location": location, "check_keys": check, "install": do_install, "import_save": do_import_save,
                 "remove_toolchain": do_remove_toolchain, "shortcut": do_shortcut, "launch": do_launch,
                 "hello": lambda req: hello()}
     hello()

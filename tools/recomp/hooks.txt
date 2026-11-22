@@ -11,6 +11,7 @@
 # frame interpolation (interp.cpp): camera, models, the play scene's draw, and what hold passes skip
 028E13CC  # camera_draw
 02B5CF50  # J3DModel::viewCalc
+02AE5F9C  # mDoExt_3DlineMat1::update: Epona's rein control points (horse draw call only)
 02B5C544  # J3DModel::calcMaterial
 02B5C2DC  # J3DModel::entry: material animations of some models
 02B5D320  # J3DModelData::simpleCalcMaterial: material animations of models drawn by particle emitters

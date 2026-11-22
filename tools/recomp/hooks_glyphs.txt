@@ -1,0 +1,7 @@
+# TP HD USA Rev 2: archive resource identities and the common native J2D texture draw path.
+02B8BAF8 # JKRArchive::getResource(name)
+02B8BB88 # JKRArchive::getResource(type, name)
+02BA6218 # JUTResReference::getResource(type, archive): resources named by J2D layouts
+02BDC0B0 # GXLoadTexObj: also covers J2DTevBlock's inlined JUTTexture::load
+02BE6F60 # HD texture handle creation, including J2D material display lists
+02BE78C4 # HD texture lookup when executing cached GX display-list texture commands

@@ -306,6 +306,11 @@ static void emit_host(Op op, std::initializer_list<uint32> payload) {
     host::with_autorelease_pool([&] { execute_one(op, payload.begin(), (uint32)payload.size()); });
 }
 
+void present_title_movie() {
+    emit_host(OP_SWAP, {});
+    render_sync();
+}
+
 #ifdef WWHD_HAS_VULKAN
 void checkpoint_vulkan_caches() {
     // Wait for queued work, then exclude further renderer mutations while the

@@ -25,6 +25,7 @@ LatteFetchShader* build_fetch_shader(uint32_t program);  // from our encoded fet
 bool uncapped();
 void set_uncapped(bool on);
 // Turbo (the built-in mod "turbo", while its key is held): unpaced as with Uncapped, not shown as a debug state.
+void present_title_movie();
 bool turbo();
 void set_turbo(bool on);
 }  // namespace gx2

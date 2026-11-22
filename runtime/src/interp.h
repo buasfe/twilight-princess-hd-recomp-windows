@@ -6,6 +6,7 @@
 #include <vector>
 
 namespace interp {
+void reset_rein_history();
 int mode();                 // 0 off (30 fps), 1 frame interpolation (at fps())
 void set_mode(int m);
 int fps();                  // frame interpolation's chosen frame rate: 60, 120 or 240

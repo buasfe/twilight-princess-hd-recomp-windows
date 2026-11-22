@@ -16,7 +16,10 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <sys/wait.h>
 #endif
 
@@ -233,6 +236,45 @@ static int run(const std::string& cmd) {
 #endif
 }
 
+static int info_with_stdin(const fs::path& exe, const fs::path& work) {
+#ifdef _WIN32
+    // Use redirected handles directly, as the installer does when it supplies keys over stdin.
+    SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
+    HANDLE in = CreateFileW((work / "keys.txt").c_str(), GENERIC_READ, FILE_SHARE_READ, &inherit,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (in == INVALID_HANDLE_VALUE) return 99;
+
+    HANDLE out = CreateFileW((work / "info2.txt").c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inherit,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (out == INVALID_HANDLE_VALUE) {
+        CloseHandle(in);
+        return 99;
+    }
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = in;
+    startup.hStdOutput = startup.hStdError = out;
+    PROCESS_INFORMATION process{};
+    std::wstring cmd = L"\"" + exe.wstring() + L"\" --keys-stdin --disc-key \"" + (work / "nonexistent").wstring() +
+                       L"\" info \"" + (work / "disc.wux").wstring() + L"\"";
+    DWORD status = 99;
+    if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr,
+                       &startup, &process)) {
+        WaitForSingleObject(process.hProcess, INFINITE);
+        GetExitCodeProcess(process.hProcess, &status);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    CloseHandle(in);
+    CloseHandle(out);
+    return (int)status;
+#else
+    return run(q(exe) + " --keys-stdin --disc-key " + q(work / "nonexistent") + " info " + q(work / "disc.wux") +
+               " < " + q(work / "keys.txt") + " > " + q(work / "info2.txt"));
+#endif
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: extract_test WWHD_EXTRACT_EXE WORKDIR\n");
@@ -385,9 +427,9 @@ int main(int argc, char** argv) {
 
     // keys over stdin
     write_text(work / "keys.txt", "disc " + hex(disc_key) + "\r\ncommon " + hex(common_key) + "\n");
-    expect(run(x + " --keys-stdin --disc-key " + q(work / "nonexistent") + " info " + q(work / "disc.wux") + " < " +
-               q(work / "keys.txt") + " > " + q(work / "info2.txt")) == 0,
-           "keys from stdin");
+    int stdin_status = info_with_stdin(exe, work);
+    if (stdin_status != 0) fprintf(stderr, "extractor stdin exit status: %d\n", stdin_status);
+    expect(stdin_status == 0, "keys from stdin");
 
     // error cases
     uint8_t bad[16];

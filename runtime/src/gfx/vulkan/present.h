@@ -12,6 +12,7 @@ struct Surface;
 struct ComposeQuad {
  Surface* image=nullptr; bool sourceLinear=false; gfx::Box box; float alpha=1;
  bool solid=false; float color[4]{};
+ bool movie=false;
 };
 // this frame's layout from gfx/display_modes.cpp, set by swap() (null: the picture scaled to fit)
 void set_present_plan(const gfx::PresentPlan* plan);

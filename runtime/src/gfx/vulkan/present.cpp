@@ -3,6 +3,7 @@
 #include "backend.h"
 #include "shaders.h"
 #include "settings.h"
+#include "title_movie.h"
 #include <algorithm>
 #include <cmath>
 #include <chrono>
@@ -26,7 +27,7 @@ const char* fragmentSource = R"glsl(#version 450
 layout(set=0,binding=0) uniform sampler2D image;
 layout(location=0) in vec2 uv;
 layout(location=0) out vec4 result;
-layout(push_constant) uniform Params { int aa; int conv; float sharp; float foot; float alpha; } params;
+layout(push_constant) uniform Params { int aa; int conv; float sharp; float foot; float alpha; int movie; } params;
 float luma(vec3 c) { return dot(c,vec3(0.299,0.587,0.114)); }
 vec3 fxaa(vec2 at) {
  vec2 rcp=1.0/vec2(textureSize(image,0));
@@ -49,6 +50,27 @@ vec3 toLinear(vec3 c) {
 vec3 toSrgb(vec3 c) {
  return mix(1.055*pow(c,vec3(1.0/2.4))-0.055,c*12.92,lessThanEqual(c,vec3(0.0031308)));
 }
+vec4 cubicWeights(float f) {
+ float f2=f*f,f3=f2*f;
+ return vec4(-0.5*f+f2-0.5*f3,1.0-2.5*f2+1.5*f3,0.5*f+2.0*f2-1.5*f3,-0.5*f2+0.5*f3);
+}
+vec3 movieBicubic(vec2 at) {
+ ivec2 size=textureSize(image,0);
+ vec2 p=at*vec2(size)-0.5;
+ ivec2 origin=ivec2(floor(p));
+ vec2 f=fract(p);
+ vec4 wx=cubicWeights(f.x),wy=cubicWeights(f.y);
+ vec3 c=vec3(0),lo=vec3(1),hi=vec3(0);
+ for(int y=0;y<4;y++) {
+  for(int x=0;x<4;x++) {
+   ivec2 coord=clamp(origin+ivec2(x-1,y-1),ivec2(0),size-1);
+   vec3 sampleColor=texelFetch(image,coord,0).rgb;
+   c+=sampleColor*wx[x]*wy[y];
+   if(x>=1&&x<=2&&y>=1&&y<=2){lo=min(lo,sampleColor);hi=max(hi,sampleColor);}
+  }
+ }
+ return clamp(c,lo,hi);
+}
 void main() {
  vec2 size=vec2(textureSize(image,0)),at=uv;
  if(params.sharp>1.0) {
@@ -56,7 +78,8 @@ void main() {
   f=clamp((f-0.5)*params.sharp+0.5,0.0,1.0);at=(i+f+0.5)/size;
  }
  vec3 c;
- if(params.aa!=0)c=fxaa(at);
+ if(params.movie!=0)c=movieBicubic(uv);
+ else if(params.aa!=0)c=fxaa(at);
  else if(params.foot>1.25) {
   vec2 d=0.25*min(params.foot,4.0)/size;
   c=0.25*(texture(image,at+vec2(-d.x,-d.y)).rgb+texture(image,at+vec2(d.x,-d.y)).rgb+
@@ -75,12 +98,13 @@ layout(push_constant) uniform Params { vec4 color; } params;
 void main() { result=params.color; }
 )glsl";
 struct PresentRect { float x,y,width,height,scale; };
-struct PresentParams { int32_t aa,conv; float sharp,foot; float alpha=1,pad[3]{}; };
+struct PresentParams { int32_t aa,conv; float sharp,foot; float alpha=1; int32_t movie=0; float pad[2]{}; };
 static_assert(sizeof(PresentParams)==32);
-PresentRect present_rect(VkExtent3D source,VkExtent2D target,int filter) {
- float scale=std::min(float(target.width)/source.width,float(target.height)/source.height);
+PresentRect present_rect(VkExtent3D source,VkExtent2D target,int filter,float pixelAspect=1) {
+ const float sourceWidth=source.width*pixelAspect;
+ float scale=std::min(float(target.width)/sourceWidth,float(target.height)/source.height);
  if(filter==2&&scale>=1)scale=std::floor(scale+1e-3f);
- const float width=source.width*scale,height=source.height*scale;
+ const float width=sourceWidth*scale,height=source.height*scale;
  return {(target.width-width)*0.5f,(target.height-height)*0.5f,width,height,scale};
 }
 PresentParams present_params(bool aa,int filter,float scale,bool sourceLinear,bool targetLinear) {
@@ -124,6 +148,49 @@ struct PresentResources {
  std::unordered_map<Screen*,ScreenResources> screens;
 };
 PresentResources resources;
+#ifdef _WIN32
+Surface movieSurface;
+uint64_t movieSerial=0;
+
+void reset_movie_surface() {
+ if(movieSurface.image)destroy_surface_image(&movieSurface);
+ movieSerial=0;
+}
+
+Surface* movie_surface(const title_movie::Frame& frame) {
+ if(frame.number==movieSerial)return &movieSurface;
+ const uint32_t height=frame.height-2*frame.matte_rows;
+ if(movieSurface.image&&(movieSurface.width!=frame.width||movieSurface.height!=height))reset_movie_surface();
+ if(!movieSurface.image) {
+  movieSurface.width=frame.width;
+  movieSurface.height=height;
+  movieSurface.format=0x1a; // RGBA8 UNORM, holding the decoded display-encoded colors.
+  movieSurface.fmt=format_info(movieSurface.format,false);
+  create_surface_image(&movieSurface,false);
+ }
+ end_encoder();
+ const size_t pixels=size_t(movieSurface.width)*movieSurface.height;
+ const auto upload=allocate_upload(pixels*4,4);
+ auto* dst=static_cast<uint8_t*>(upload.mapped);
+ const auto* src=frame.bgr.data()+size_t(frame.matte_rows)*movieSurface.width*3;
+ for(size_t i=0;i<pixels;i++,src+=3,dst+=4) {
+  dst[0]=src[2];
+  dst[1]=src[1];
+  dst[2]=src[0];
+  dst[3]=255;
+ }
+ transition_image(&movieSurface,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+ VkBufferImageCopy copy{};
+ copy.bufferOffset=upload.offset;
+ copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+ copy.imageExtent=movieSurface.extent;
+ vkCmdCopyBufferToImage(command_buffer(),upload.buffer,movieSurface.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+ movieSerial=frame.number;
+ return &movieSurface;
+}
+#endif
 bool srgb_format(VkFormat format) {
  return format==VK_FORMAT_R8G8B8A8_SRGB || format==VK_FORMAT_B8G8R8A8_SRGB ||
         format==VK_FORMAT_A8B8G8R8_SRGB_PACK32;
@@ -207,6 +274,9 @@ void prepare_present_screen(Screen& screen,bool colorAttachmentSupported,bool ca
  }catch(...){reset_present_screen(screen);throw;}
 }
 void reset_present_resources() {
+#ifdef _WIN32
+ reset_movie_surface();
+#endif
  if(present_capture().buffer.buffer) { defer_buffer(present_capture().buffer);present_capture().buffer={}; }
  // Caller has drained the device; command/descriptor pools must not execute
  // references to these process-lifetime presentation objects afterwards.
@@ -269,7 +339,7 @@ void compose(VkImage image,VkImageView view,VkImageLayout& layout,VkExtent2D ext
   // sRGB texture views decode on sampling; the scan flag also identifies linear
   // scan values held in a UNORM image. sRGB targets encode shader linear output.
   const bool sourceLinear=q.sourceLinear||srgb_format(q.image->fmt.pixel);
-  auto params=present_params(fxaa&&linear,filter,scale,sourceLinear,targetLinear);params.alpha=q.alpha;
+  auto params=present_params(fxaa&&linear,filter,scale,sourceLinear,targetLinear);params.alpha=q.alpha;params.movie=q.movie?1:0;
   vkCmdPushConstants(cmd,resources.layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(params),&params);vkCmdDraw(cmd,3,1,0,0);
  }
  if(overlay)overlay_draw(overlay,cmd,format,extent,targetLinear);  // settings overlay on top
@@ -287,6 +357,21 @@ void set_overlay_draw(ImDrawData* draw) { overlayDraw=draw; }
 std::vector<ComposeQuad> screen_quads(Screen& screen,VkExtent2D target,int& filter) {
  std::vector<ComposeQuad> quads;
  filter=scale_filter();
+#ifdef _WIN32
+ if(title_movie::active()) {
+  if(const auto frame=title_movie::frame()) {
+   auto* picture=movie_surface(*frame);
+   const auto rect=present_rect(picture->extent,target,0,frame->pixel_aspect);
+   ComposeQuad movie;
+   movie.image=picture;
+   movie.box={rect.x,rect.y,rect.width,rect.height};
+   movie.movie=true;
+   quads.push_back(movie);
+  }
+  return quads;
+ }
+ if(movieSurface.image)reset_movie_surface();
+#endif
  if(!screen.scan||!screen.scan->image)return quads;
  if(currentPlan) {
   // both window hosts (gfx/display_modes.cpp): the same layout as the Metal renderer

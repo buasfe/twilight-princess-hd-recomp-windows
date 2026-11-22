@@ -26,7 +26,10 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import zipfile
+
+import guard
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 OBJ_EXT = (".o", ".obj")
@@ -45,6 +48,18 @@ INSTALLER_FILES = [
     "tools/installer/README.md",
 ]
 SETUP_APP = "Twilight Princess HD"
+WINDOWS_PORTABLE_TXT = """Twilight Princess HD: Recompiled - Windows Edition
+
+Unzip the complete package and open Twilight Princess HD.exe. Setup checks your own Twilight Princess HD
+for Wii U, USA Rev 2 (v81) and builds the game locally. Subsequent starts open the compiled game.
+
+By default the installation is in data/ next to the launcher. Setup can also use an empty folder
+you choose. Keep that folder and the launcher if you want to continue using the installation.
+An extracted source folder is used where it is. Keep it at the selected path.
+
+Hold Shift while opening the launcher, or use --setup, to repair, set up in another folder or import a save.
+If the graphical interface cannot start, use tools/Setup in a console window.bat.
+"""
 PORTABLE_TXT = """Twilight Princess HD (native macOS port), portable release.
 
 Start "Twilight Princess HD". The first start prepares the game once from your own disc dump (releases never
@@ -160,6 +175,34 @@ def link_command(build):
     return args
 
 
+def verify_stub_sources(build):
+    """Verify that the release's Ninja guest target uses only this source tree's exact stubs."""
+    with open(os.path.join(build, "compile_commands.json"), encoding="utf-8") as f:
+        db = json.load(f)
+    files = {}
+    for entry in db:
+        if "CMakeFiles/gamecode.dir/" not in entry.get("output", entry.get("command", "")).replace("\\", "/"):
+            continue
+        path = os.path.realpath(os.path.join(entry["directory"], entry["file"]))
+        files.setdefault(os.path.dirname(path), set()).add(os.path.basename(path))
+    if len(files) != 1:
+        sys.exit("release packaging requires a Ninja gamecode target built from one stub directory")
+    src, compiled = next(iter(files.items()))
+    with tempfile.TemporaryDirectory() as expected:
+        subprocess.run([sys.executable, os.path.join(ROOT, "tools", "recomp", "stubgen.py"), expected], check=True)
+        names = set(os.listdir(expected))
+        if compiled != {n for n in names if n.endswith(".c")}:
+            sys.exit("release packaging requires exactly the guest sources emitted by stubgen.py")
+        for name in names - {"report.txt"}:
+            try:
+                with open(os.path.join(expected, name), "rb") as stub, open(os.path.join(src, name), "rb") as actual:
+                    matches = stub.read() == actual.read()
+            except OSError:
+                matches = False
+            if not matches:
+                sys.exit("release packaging refused: %s differs from stubgen.py output" % name)
+
+
 def gamecode_flags(build):
     with open(os.path.join(build, "compile_commands.json")) as f:
         db = json.load(f)
@@ -227,13 +270,14 @@ def build_link_recipe(build, pkg, linkonly):
             if name in ("libgamecode.a", "gamecode.lib"):
                 recipe.append("{gamecode}")
                 continue
-            # the game's Windows resources (VERSIONINFO + manifest) from our own generated .rc
-            # (cmake/WindowsResources.cmake; windres writes a COFF object named .rc.res)
-            own_res = re.fullmatch(r"CMakeFiles/wwhd\.dir/generated/wwhd\.rc\.res",
-                                   os.path.relpath(path, build).replace("\\", "/"))
-            if a.lower().endswith(OBJ_EXT) or own_res:
+            rel = os.path.relpath(path, build).replace("\\", "/")
+            own_resources = rel == "CMakeFiles/wwhd.dir/generated/wwhd.rc.res"
+            own_build_info = rel == "CMakeFiles/wwhd.dir/generated/build_info.cpp.obj"
+            if a.lower().endswith(OBJ_EXT) or own_resources:
+                if os.name == "nt" and not (own_resources or own_build_info
+                                            or rel.startswith("CMakeFiles/wwhd.dir/runtime/src/")):
+                    sys.exit("unexpected object on the Windows runtime link line: " + a)
                 # flatten CMakeFiles/wwhd.dir/runtime/src/x.cpp.o -> obj/runtime_src_x.cpp.o
-                rel = os.path.relpath(path, build).replace("\\", "/")
                 rel = re.sub(r"^CMakeFiles/[^/]+\.dir/", "", rel)
                 flat = re.sub(r"[^A-Za-z0-9_.+-]", "_", rel)
                 shutil.copy2(path, os.path.join(pkg, "sdk", "obj", flat))
@@ -332,12 +376,20 @@ def main():
     a = ap.parse_args()
 
     build = os.path.abspath(a.build)
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._+-]*", a.version):
+        sys.exit("version must be a single tag name without path separators")
     name = "TwilightPrincessHD-%s-%s" % (a.version, a.platform)
     pkg = os.path.join(os.path.abspath(a.out), name)
-    if os.path.exists(pkg):
-        shutil.rmtree(pkg)
+    if os.path.lexists(pkg) or os.path.lexists(pkg + ".zip"):
+        sys.exit("output already exists: choose a new --out directory")
+    windows = a.platform.startswith("windows")
+    if windows:
+        out_setup = os.path.join(build, "wwhd-setup.exe")
+        if not a.setup_gui or os.path.normcase(os.path.realpath(a.setup_gui)) != os.path.normcase(os.path.realpath(out_setup)):
+            sys.exit("Windows releases must use wwhd-setup.exe from the same clean Ninja build")
+        verify_stub_sources(build)
     os.makedirs(pkg)
-    exe_suffix = ".exe" if a.platform.startswith("windows") else ""
+    exe_suffix = ".exe" if windows else ""
 
     driver, link, nobj, nlib = build_link_recipe(build, pkg, a.linkonly_lib)
     cflags = gamecode_flags(build)
@@ -396,12 +448,17 @@ def main():
         copy(os.path.join(inst, "install-linux.sh"), os.path.join(pkg, "tools", "setup-in-terminal.sh"))
     # portable release: everything stays in this folder (setup.py and the game look for this file)
     with open(os.path.join(pkg, "portable.txt"), "w") as f:
-        f.write(PORTABLE_TXT)
+        f.write(WINDOWS_PORTABLE_TXT if windows else PORTABLE_TXT)
 
     if a.setup_gui:
         add_setup_gui(pkg, a.platform, a.setup_gui, a.version)
 
     copy(os.path.join(ROOT, "README.md"), os.path.join(pkg, "README.md"))
+    if windows:
+        copy(os.path.join(ROOT, "CREDITS.md"), os.path.join(pkg, "CREDITS.md"))
+        with open(os.path.join(pkg, "SOURCE.txt"), "w", encoding="utf-8") as f:
+            f.write("MPL-2.0 source for this setup and runtime:\n"
+                    "https://github.com/buasfe/twilight-princess-hd-recomp-windows/tree/%s\n" % a.version)
     lic = os.path.join(ROOT, "LICENSE")
     if os.path.isfile(lic):
         copy(lic, os.path.join(pkg, "LICENSE"))
@@ -428,7 +485,7 @@ def main():
     with open(os.path.join(licdir, "README.txt"), "w") as f:
         f.writelines(index)
     with open(os.path.join(pkg, "VERSION.txt"), "w") as f:
-        f.write("Twilight Princess HD native macOS port %s (%s)\n"
+        f.write("Twilight Princess HD: Recompiled %s (%s)\n"
                 "This package contains no game code, game data or keys; the installer builds the game\n"
                 "from your own disc dump on your machine.\n" % (a.version, a.platform))
 
@@ -436,6 +493,10 @@ def main():
     if not a.no_zip:
         zp = pkg + ".zip"
         make_zip(pkg, zp)
+        if windows:
+            problems, _ = guard.scan(zp, windows_setup=True)
+            if problems:
+                sys.exit("Windows ZIP failed audit. Keep it local:\n  " + "\n  ".join(problems))
         print("wrote", zp, os.path.getsize(zp) // (1 << 20), "MiB")
 
 

@@ -6,6 +6,7 @@
 #endif
 #include "backend.h"
 #include "buffer_cache.h"
+#include "device_requirements.h"
 #include "render_prof.h"
 #include "report_header.h"
 #include "present.h"
@@ -1664,36 +1665,7 @@ std::string device_description() {
   return reporthdr::vulkan_gpu(R.properties.deviceName, R.properties.vendorID, R.properties.driverVersion,
                                R.properties.apiVersion, kWindows);
 }
-// How a GPU provides dynamic rendering, the renderer's only way of drawing: Vulkan 1.3 core, or
-// VK_KHR_dynamic_rendering on a Vulkan 1.1 / 1.2 driver. Shaders are SPIR-V 1.3 (Vulkan 1.1).
-enum class DynamicRendering { None, Core, KHR };
-static DynamicRendering dynamic_rendering(VkPhysicalDevice device, const VkPhysicalDeviceProperties &properties,
-                                          const std::vector<VkExtensionProperties> &des) {
-  const uint32_t api = device_api_version(properties);
-  if (api < VK_API_VERSION_1_1)
-    return DynamicRendering::None;
-  if (api >= VK_API_VERSION_1_3) {
-    VkPhysicalDeviceVulkan13Features f13{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
-    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    f2.pNext = &f13;
-    vkGetPhysicalDeviceFeatures2(device, &f2);
-    if (f13.dynamicRendering)
-      return DynamicRendering::Core;
-  }
-  // the extension requires VK_KHR_depth_stencil_resolve (core in 1.2), which requires
-  // VK_KHR_create_renderpass2 (core in 1.2)
-  if (!has_extension(des, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) ||
-      (api < VK_API_VERSION_1_2 && (!has_extension(des, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME) ||
-                                    !has_extension(des, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME))))
-    return DynamicRendering::None;
-  VkPhysicalDeviceDynamicRenderingFeaturesKHR fdr{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR};
-  VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-  f2.pNext = &fdr;
-  vkGetPhysicalDeviceFeatures2(device, &f2);
-  return fdr.dynamicRendering ? DynamicRendering::KHR : DynamicRendering::None;
-}
+
 static const char kUpdateDriver[] =
 #ifdef _WIN32
     "Install the newest graphics driver for this GPU (from the AMD, Intel or NVIDIA website, or through "
@@ -1819,45 +1791,45 @@ static void init_device(std::vector<const char *> extensions,
   std::vector<VkPhysicalDevice> devices(n);
   vkEnumeratePhysicalDevices(R.instance, &n, devices.data());
   devices.resize(n);
-  // First the GPUs with Vulkan 1.3 (in the driver's order), then those with VK_KHR_dynamic_rendering
-  std::string unsuitable;  // the GPUs passed over, for the message when none is left
-  for (DynamicRendering want : {DynamicRendering::Core, DynamicRendering::KHR}) {
-    for (auto device : devices) {
-      VkPhysicalDeviceProperties properties;
-      vkGetPhysicalDeviceProperties(device, &properties);
-      const DynamicRendering have = dynamic_rendering(device, properties, device_extensions(device));
-      if (have != want) {
-        if (want == DynamicRendering::KHR && have == DynamicRendering::None)
-          unsuitable += std::string("\n") + properties.deviceName + ": Vulkan " +
-                        version_text(device_api_version(properties)) + ", driver " +
-                        driver_version_text(properties) +
-                        (device_api_version(properties) < VK_API_VERSION_1_1 ? "; older than Vulkan 1.1"
-                                                                             : "; VK_KHR_dynamic_rendering missing");
-        continue;
-      }
-      uint32_t qn;
-      vkGetPhysicalDeviceQueueFamilyProperties(device, &qn, nullptr);
-      std::vector<VkQueueFamilyProperties> qs(qn);
-      vkGetPhysicalDeviceQueueFamilyProperties(device, &qn, qs.data());
-      for (uint32_t q = 0; q < qn; q++) {
-        VkBool32 tv = 0, drc = VK_TRUE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(device, q, R.tv.surface, &tv);
-        if (R.drc.surface)
-          vkGetPhysicalDeviceSurfaceSupportKHR(device, q, R.drc.surface, &drc);
-        if ((qs[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && tv && drc) {
-          R.physicalDevice = device;
-          R.queueFamily = q;
-          R.gpuTimestampValidBits = qs[q].timestampValidBits;
-          R.dynamicRenderingKHR = have == DynamicRendering::KHR;
-          break;
-        }
-      }
-      if (R.physicalDevice)
-        break;
-      unsuitable += std::string("\n") + properties.deviceName + ": cannot draw to the game window";
+  std::string unsuitable;
+  int best_rank = -1;
+  for (auto device : devices) {
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(device, &properties);
+    const auto extensions = device_extensions(device);
+    const auto support = check_device(device, device_api_version(properties),
+        [&](const char *name) { return has_extension(extensions, name); },
+        vkGetPhysicalDeviceFeatures2);
+    if (support.missing) {
+      unsuitable += std::string("\n") + properties.deviceName + ": missing " + support.missing;
+      continue;
     }
-    if (R.physicalDevice)
+    const int rank = device_rank(support.rendering, properties.deviceType);
+    if (rank <= best_rank)
+      continue;
+
+    uint32_t qn;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &qn, nullptr);
+    std::vector<VkQueueFamilyProperties> qs(qn);
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &qn, qs.data());
+    for (uint32_t q = 0; q < qn; q++) {
+      if (!(qs[q].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+        continue;
+      VkBool32 tv = VK_FALSE, drc = VK_TRUE;
+      vkGetPhysicalDeviceSurfaceSupportKHR(device, q, R.tv.surface, &tv);
+      if (R.drc.surface)
+        vkGetPhysicalDeviceSurfaceSupportKHR(device, q, R.drc.surface, &drc);
+      if (!tv || !drc)
+        continue;
+      R.physicalDevice = device;
+      R.queueFamily = q;
+      R.gpuTimestampValidBits = qs[q].timestampValidBits;
+      R.dynamicRenderingKHR = support.rendering == DynamicRendering::KHR;
+      best_rank = rank;
       break;
+    }
+    if (rank != best_rank)
+      unsuitable += std::string("\n") + properties.deviceName + ": cannot draw to the game window";
   }
   if (!R.physicalDevice)
     throw std::runtime_error(

@@ -1,3 +1,4 @@
+#include "title_movie.h"
 #include <mutex>
 // In-game settings overlay: the Dear ImGui user interface (see overlay.h). The renderers draw the
 // resulting ImDrawData (gfx/overlay_metal.mm, gfx/vulkan/overlay.cpp); the hosts feed input and apply
@@ -24,6 +25,7 @@
 #include "controls_view.h"
 #include "../amiibo.h"
 #include "../aspect.h"
+#include "../button_prompts.h"
 #include "../look.h"
 #include "../crashrec.h"
 #include "../game_languages.h"
@@ -736,6 +738,25 @@ void tab_display() {
         }
         note("A click (or touch) on the GamePad picture touches the GamePad screen.");
     }
+#if defined(_WIN32) && defined(WWHD_HAS_VULKAN)
+    ImGui::SeparatorText("Title cinematics");
+    const auto media = [](const char* key, const char* button, const char* kind, const char* ext, const char* empty) {
+        ImGui::PushID(key);
+        std::string path;
+        hostui::get(key, path);
+        if (ImGui::Button(button)) title_movie::choose_file(key, kind, ext);
+        if (!path.empty()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) hostui::post([key] { hostui::set(key, ""); });
+            ImGui::TextWrapped("%s", path.substr(path.find_last_of("/\\") + 1).c_str());
+        } else ImGui::TextDisabled("%s", empty);
+        ImGui::PopID();
+    };
+    media("attractVideo", "Choose HD video...", "Video files", "mp4;mov;m4v;mkv;webm", "No local video selected");
+    media("attractIso", "Choose GameCube ISO...", "GameCube ISO", "iso", "No GameCube ISO selected");
+    media("attractFfmpeg", "Choose FFmpeg...", "FFmpeg executable", "exe", "Uses FFmpeg on PATH");
+    help("Optional, local files only. If a video is unavailable, the GameCube ISO is tried next.");
+#endif
 }
 
 // The one-time native code confirmation (packages.h confirm_native): asked before enable() for each
@@ -1205,6 +1226,14 @@ void gyro_window(bool& open) {
 void tab_controls() {
     bool v;
     input_map::Mapping m = input_map::current();
+    int prompts=int(m.prompts);
+    ImGui::SetNextItemWidth(230);
+    if(ImGui::Combo("Button prompts",&prompts,"Auto\0Original Wii U\0Xbox\0PlayStation\0Keyboard / Mouse\0")) {
+        m.prompts=input_map::Mapping::Prompts(prompts);input_map::set_current(m);
+    }
+    const auto device=button_prompts::active_device();
+    ImGui::SameLine();ImGui::TextDisabled("%s",button_prompts::style_name(button_prompts::style(m,device.family)));
+    help("Changes the game's prompts using your actual bindings. Original Wii U preserves the authored icons. Virtual controllers may report the emulated controller type; choose a style manually if necessary.");
     // top: which controller the keyboard and controllers act as (the drawing follows), view switch
     const bool pro = input::pro_controller();
     ImGui::AlignTextToFramePadding();

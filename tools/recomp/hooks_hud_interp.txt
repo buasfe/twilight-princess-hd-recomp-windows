@@ -1,0 +1,4 @@
+# USA Rev 2: screens reused for each Epona spur or each dialogue halo.
+02B433DC  # J2DScreen::draw (interp.cpp scopes the two meter calls and the glow call)
+@02A83C30  # dMsgScrnLight_c::draw: before adding 1 to the character's frame
+@02A83D94  # dMsgScrnLight_c::draw overload: before adding the supplied animation rate

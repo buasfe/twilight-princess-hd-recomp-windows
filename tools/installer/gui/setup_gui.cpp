@@ -44,6 +44,9 @@
 #include <windows.h>
 
 #include "console_setup_win.h"
+#ifdef WWHD_SETUP_VULKAN_CHECK
+#include "vulkan_preflight_win.h"
+#endif
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -367,7 +370,7 @@ static bool shift_held() {
 // ---------------------------------------------------------------------------------------------
 // state
 
-enum class Screen { Starting, NeedCLT, Menu, Welcome, Source, Keys, Installing, Error, Save, Done, Fatal };
+enum class Screen { Starting, NeedCLT, Menu, Welcome, Location, Source, Keys, Installing, Error, Save, Done, Fatal };
 
 static const char* screen_name(Screen s) {
     switch (s) {
@@ -375,6 +378,7 @@ static const char* screen_name(Screen s) {
     case Screen::NeedCLT: return "clt";
     case Screen::Menu: return "menu";
     case Screen::Welcome: return "welcome";
+    case Screen::Location: return "location";
     case Screen::Source: return "source";
     case Screen::Keys: return "keys";
     case Screen::Installing: return "installing";
@@ -398,6 +402,7 @@ struct App {
     std::vector<std::string> passthru;  // arguments for setup.py
     Child child;
     Screen screen = Screen::Starting;
+    bool reset_scroll = true;
     std::string fatal;         // what failed (shown under "Setup could not continue")
     std::string fatal_hint;    // what to do about it
     std::string fatal_folder;  // a folder the fatal screen offers to show (e.g. where the app really is)
@@ -425,7 +430,9 @@ struct App {
     // install
     std::vector<Step> steps;
     int current = -1;
-    std::string install_source;
+    std::string install_source, install_dir, location_msg;
+    double location_free = 0;
+    bool location_ok = true;
     std::string error_msg, error_back;  // error_back: screen name for Retry
     std::string result_app;
 
@@ -481,6 +488,7 @@ static void addlog(const std::string& s) {
 
 static void go(Screen s) {
     A.screen = s;
+    A.reset_scroll = true;
 }
 
 static void fail(const std::string& what, const std::string& todo, const std::string& folder = "");
@@ -504,73 +512,196 @@ static bool busy() { return A.pending_id != 0; }
 // look
 
 static ImFont* g_font = nullptr;
-static const ImVec4 ACCENT(0.11f, 0.47f, 0.76f, 1.0f);
-static const ImVec4 GOOD(0.16f, 0.60f, 0.30f, 1.0f);
-static const ImVec4 BAD(0.80f, 0.20f, 0.18f, 1.0f);
-static const ImVec4 MUTED(0.42f, 0.45f, 0.50f, 1.0f);
+static ImFont* g_display_font = nullptr;
+static const ImVec4 ACCENT(0.50f, 0.78f, 0.72f, 1.0f);
+static const ImVec4 GOLD(0.89f, 0.76f, 0.52f, 1.0f);
+static const ImVec4 GOOD(0.58f, 0.81f, 0.69f, 1.0f);
+static const ImVec4 BAD(0.99f, 0.64f, 0.58f, 1.0f);
+static const ImVec4 MUTED(0.66f, 0.73f, 0.69f, 1.0f);
+static const ImVec4 INK(0.08f, 0.11f, 0.11f, 1.0f);
 
-static void load_fonts(float scale) {
+static float ui(float value) { return value * ImGui::GetStyle().FontScaleDpi; }
+
+static void load_fonts() {
     ImGuiIO& io = ImGui::GetIO();
-    const char* candidates[] = {
-#if defined(__APPLE__)
-        "/System/Library/Fonts/SFNS.ttf", "/System/Library/Fonts/Helvetica.ttc", "/Library/Fonts/Arial.ttf",
-#elif defined(_WIN32)
-        "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf",
-#else
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf", "/usr/share/fonts/cantarell/Cantarell-Regular.otf",
-#endif
-    };
-    (void)scale;
-    for (const char* c : candidates) {
-        SDL_PathInfo info;
-        if (SDL_GetPathInfo(c, &info) && info.type == SDL_PATHTYPE_FILE) {
-            g_font = io.Fonts->AddFontFromFileTTF(c, 17.0f);
-            if (g_font) break;
+#ifdef _WIN32
+    wchar_t windows[MAX_PATH];
+    UINT chars = GetWindowsDirectoryW(windows, MAX_PATH);
+    std::string fonts;
+    if (chars > 0 && chars < MAX_PATH) {
+        int bytes = WideCharToMultiByte(CP_UTF8, 0, windows, (int)chars, nullptr, 0, nullptr, nullptr);
+        if (bytes > 0) {
+            fonts.resize(bytes);
+            WideCharToMultiByte(CP_UTF8, 0, windows, (int)chars, fonts.data(), bytes, nullptr, nullptr);
+            fonts += "/Fonts/";
         }
     }
+    if (!fonts.empty()) {
+        std::string body = fonts + "segoeui.ttf";
+        std::string title = fonts + "georgia.ttf";
+        SDL_PathInfo info;
+        if (SDL_GetPathInfo(body.c_str(), &info))
+            g_font = io.Fonts->AddFontFromFileTTF(body.c_str(), 17.0f);
+        if (SDL_GetPathInfo(title.c_str(), &info))
+            g_display_font = io.Fonts->AddFontFromFileTTF(title.c_str(), 28.0f);
+    }
+#endif
     if (!g_font) {
         ImFontConfig cfg;
         cfg.SizePixels = 17.0f;
         g_font = io.Fonts->AddFontDefaultVector(&cfg);
     }
+    io.FontDefault = g_font;
+    if (!g_display_font) g_display_font = g_font;
 }
 
 static void apply_style(float scale) {
-    ImGui::StyleColorsLight();
+    ImGui::StyleColorsDark();
     ImGuiStyle& st = ImGui::GetStyle();
-    st.WindowPadding = ImVec2(28, 22);
-    st.FramePadding = ImVec2(12, 7);
+    st.WindowPadding = ImVec2(30, 22);
+    st.FramePadding = ImVec2(13, 8);
     st.ItemSpacing = ImVec2(10, 10);
-    st.FrameRounding = 6;
-    st.GrabRounding = 6;
-    st.ChildRounding = 8;
-    st.PopupRounding = 8;
+    st.FrameRounding = 4;
+    st.GrabRounding = 4;
+    st.ChildRounding = 6;
+    st.PopupRounding = 6;
     st.WindowRounding = 0;
     st.FrameBorderSize = 1;
     ImVec4* c = st.Colors;
-    c[ImGuiCol_WindowBg] = ImVec4(0.975f, 0.98f, 0.985f, 1);
-    c[ImGuiCol_ChildBg] = ImVec4(1, 1, 1, 1);
-    c[ImGuiCol_Border] = ImVec4(0.82f, 0.85f, 0.88f, 1);
-    c[ImGuiCol_Text] = ImVec4(0.12f, 0.14f, 0.17f, 1);
-    c[ImGuiCol_Button] = ImVec4(0.92f, 0.94f, 0.96f, 1);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.85f, 0.90f, 0.95f, 1);
-    c[ImGuiCol_ButtonActive] = ImVec4(0.78f, 0.86f, 0.94f, 1);
-    c[ImGuiCol_FrameBg] = ImVec4(1, 1, 1, 1);
-    c[ImGuiCol_PlotHistogram] = ACCENT;
-    c[ImGuiCol_CheckMark] = ACCENT;
-    c[ImGuiCol_Header] = ImVec4(0.90f, 0.93f, 0.96f, 1);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.85f, 0.90f, 0.95f, 1);
+    c[ImGuiCol_WindowBg] = INK;
+    c[ImGuiCol_PopupBg] = ImVec4(.10f, .16f, .16f, 1);
+    c[ImGuiCol_ChildBg] = ImVec4(.11f, .17f, .17f, 1);
+    c[ImGuiCol_Border] = ImVec4(.29f, .37f, .34f, 1);
+    c[ImGuiCol_Text] = ImVec4(.94f, .91f, .83f, 1);
+    c[ImGuiCol_TextDisabled] = MUTED;
+    c[ImGuiCol_Button] = ImVec4(.14f, .22f, .22f, 1);
+    c[ImGuiCol_ButtonHovered] = ImVec4(.22f, .33f, .31f, 1);
+    c[ImGuiCol_ButtonActive] = ImVec4(.27f, .40f, .38f, 1);
+    c[ImGuiCol_FrameBg] = ImVec4(.09f, .14f, .14f, 1);
+    c[ImGuiCol_FrameBgHovered] = c[ImGuiCol_ButtonHovered];
+    c[ImGuiCol_FrameBgActive] = c[ImGuiCol_ButtonActive];
+    c[ImGuiCol_CheckMark] = GOLD;
+    c[ImGuiCol_Header] = c[ImGuiCol_Button];
+    c[ImGuiCol_HeaderHovered] = c[ImGuiCol_ButtonHovered];
+    c[ImGuiCol_HeaderActive] = c[ImGuiCol_ButtonActive];
+    c[ImGuiCol_NavCursor] = GOLD;
+    c[ImGuiCol_Separator] = c[ImGuiCol_Border];
+    c[ImGuiCol_TextSelectedBg] = ImVec4(.31f, .48f, .43f, .65f);
     st.ScaleAllSizes(scale);
     st.FontScaleDpi = scale;
 }
 
-static void heading(const char* text, float size = 27.0f) {
-    ImGui::PushFont(nullptr, size);
-    ImGui::TextUnformatted(text);
+static void heading(const char* text, float size = 28.0f) {
+    ImGui::PushFont(g_display_font, size);
+    ImGui::TextWrapped("%s", text);
     ImGui::PopFont();
+}
+
+// An original diamond seal and angular linework drawn from primitives.
+static void diamond(ImDrawList* draw, ImVec2 c, float x, float y, ImU32 color, float stroke) {
+    const ImVec2 points[] = {{c.x, c.y - y}, {c.x + x, c.y}, {c.x, c.y + y}, {c.x - x, c.y}};
+    draw->AddPolyline(points, 4, color, stroke, ImDrawFlags_Closed);
+}
+
+static void lower_artwork(ImDrawList* draw, ImVec2 p, ImVec2 size) {
+    const ImVec2 center(p.x + size.x * .57f, p.y + size.y - ui(48));
+    const float width = std::min(ui(290), size.x * .29f);
+    const float height = ui(110);
+    for (float scale : {1.0f, .83f, .55f}) {
+        diamond(draw, center, width * scale, height * scale, IM_COL32(152, 176, 145, 28), ui(1));
+    }
+    diamond(draw, center, ui(13), ui(22), IM_COL32(224, 190, 122, 48), ui(1));
+    for (float side : {-1.0f, 1.0f}) {
+        const ImVec2 branch[] = {
+            {center.x + side * ui(26), center.y - ui(18)},
+            {center.x + side * width * .25f, center.y - ui(44)},
+            {center.x + side * width * .40f, center.y - ui(44)},
+            {center.x + side * width * .54f, center.y - ui(65)},
+            {center.x + side * width * .64f, center.y - ui(65)}
+        };
+        draw->AddPolyline(branch, 5, IM_COL32(113, 190, 175, 48), ui(1));
+        diamond(draw, branch[4], ui(4), ui(4), IM_COL32(224, 190, 122, 58), ui(1));
+    }
+}
+
+static void atmosphere() {
+    ImDrawList* d = ImGui::GetBackgroundDrawList();
+    ImVec2 p = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
+    ImVec2 q(p.x + size.x, p.y + size.y);
+    d->PushClipRect(p, q, false);
+    d->AddRectFilledMultiColor(p, q, IM_COL32(15, 22, 24, 255), IM_COL32(29, 51, 50, 255),
+                               IM_COL32(19, 31, 35, 255), IM_COL32(11, 17, 22, 255));
+    ImVec2 c(q.x - ui(93), p.y + ui(50));
+    for (int i = 0; i < 5; ++i) {
+        float r = ui(38.0f + i * 18.0f);
+        diamond(d, c, r, r * .60f, IM_COL32(135, 184, 169, 25 - i * 3), ui(1));
+    }
+    for (int i = 0; i < 13; ++i) {
+        ImVec2 speck(q.x - ui(20 + (i * 47) % 220), p.y + ui(12 + (i * 31) % 104));
+        d->AddCircleFilled(speck, ui(i % 4 == 0 ? 1.5f : 0.8f), IM_COL32(215, 188, 128, 48));
+    }
+    // Contours sit below the page copy, with no texture or imported artwork.
+    for (int i = 0; i < 5; ++i) {
+        const float y = q.y - ui(25.0f + i * 15.0f);
+        const ImVec2 ridge[] = {{p.x + size.x * .33f, q.y}, {p.x + size.x * .56f, y}, {p.x + size.x * .70f, y},
+                                {p.x + size.x * .84f, y - ui(51)}, {q.x, y - ui(51)}};
+        d->AddPolyline(ridge, 5, IM_COL32(100, 151, 142, 15 + i * 2), ui(1));
+    }
+    lower_artwork(d, p, size);
+    d->AddRect(ImVec2(p.x + ui(9), p.y + ui(9)), ImVec2(q.x - ui(9), q.y - ui(9)),
+               IM_COL32(175, 156, 109, 72));
+    d->AddLine(ImVec2(p.x + ui(25), p.y + ui(9)), ImVec2(p.x + ui(112), p.y + ui(9)),
+               IM_COL32(226, 193, 131, 190), ui(2));
+    d->PopClipRect();
+}
+
+static void masthead() {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImVec2 seal(p.x + ui(23), p.y + ui(28));
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    diamond(d, seal, ui(21), ui(25), ImGui::GetColorU32(GOLD), ui(1));
+    diamond(d, seal, ui(15), ui(18), ImGui::GetColorU32(ACCENT), ui(1));
+    diamond(d, seal, ui(5), ui(9), ImGui::GetColorU32(GOLD), ui(2));
+    ImGui::Dummy(ImVec2(ui(45), ui(55)));
+    ImGui::SameLine(0, ui(14));
+    ImGui::BeginGroup();
+    heading("Twilight Princess HD: Recompiled", 26);
+    ImGui::TextColored(ACCENT, "%s", A.platform.rfind("windows", 0) == 0
+#ifdef _WIN32
+                      || A.platform.empty()
+#endif
+                      ? "WINDOWS EDITION  /  SETUP" : "LOCAL SETUP");
+    ImGui::EndGroup();
+    ImGui::Separator();
+}
+
+static void journey(int active) {
+    const char* labels[] = {"Install location", "Game files", "Local build"};
+    for (int i = 0; i < 3; ++i) {
+        if (i) ImGui::SameLine(0, ui(24));
+        const ImVec4& color = i == active ? GOLD : i < active ? ACCENT : MUTED;
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImVec2 c(p.x + ui(5), p.y + ImGui::GetFrameHeight() * .5f);
+        diamond(ImGui::GetWindowDrawList(), c, ui(4), ui(4), ImGui::GetColorU32(color), ui(i == active ? 2 : 1));
+        ImGui::Dummy(ImVec2(ui(11), ImGui::GetFrameHeight()));
+        ImGui::SameLine(0, ui(5));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(color, "%s", labels[i]);
+    }
+}
+
+static void progress_track(double fraction) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float w = ImGui::GetContentRegionAvail().x, h = ui(6);
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    d->AddRectFilled(p, ImVec2(p.x + w, p.y + h), IM_COL32(10, 18, 20, 255), ui(3));
+    d->AddRect(p, ImVec2(p.x + w, p.y + h), IM_COL32(78, 99, 89, 255), ui(3));
+    float filled = w * (float)std::clamp(fraction, 0.0, 1.0);
+    if (filled > 0)
+        d->AddRectFilled(p, ImVec2(p.x + filled, p.y + h), ImGui::GetColorU32(GOLD), ui(3));
+    if (filled > ui(4) && filled < w - ui(4))
+        diamond(d, ImVec2(p.x + filled, p.y + h * .5f), ui(3), ui(5), ImGui::GetColorU32(GOLD), ui(1));
+    ImGui::Dummy(ImVec2(w, h));
 }
 
 static void muted(const std::string& t) {
@@ -585,28 +716,30 @@ static void colored(const ImVec4& col, const std::string& t) {
     ImGui::PopStyleColor();
 }
 
-// a status mark drawn with lines (independent of the font's glyphs): 0 waiting, 1 running, 2 ok, 3 failed
+// The shape, fill and glyph carry the state independently of color.
 static void mark(int state) {
     float sz = ImGui::GetFontSize();
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 c(p.x + sz * 0.5f, p.y + sz * 0.55f);
-    float r = sz * 0.45f;
+    ImVec2 c(p.x + sz * .5f, p.y + sz * .55f);
+    float r = sz * .43f;
+    const ImVec2 points[] = {{c.x, c.y - r}, {c.x + r, c.y}, {c.x, c.y + r}, {c.x - r, c.y}};
+    const ImU32 ink = ImGui::GetColorU32(INK);
     if (state == 2) {
-        dl->AddCircleFilled(c, r, ImGui::GetColorU32(GOOD));
-        dl->AddLine(ImVec2(c.x - r * 0.45f, c.y), ImVec2(c.x - r * 0.1f, c.y + r * 0.38f), IM_COL32_WHITE, sz * 0.12f);
-        dl->AddLine(ImVec2(c.x - r * 0.1f, c.y + r * 0.38f), ImVec2(c.x + r * 0.5f, c.y - r * 0.35f), IM_COL32_WHITE, sz * 0.12f);
+        dl->AddConvexPolyFilled(points, 4, ImGui::GetColorU32(GOOD));
+        dl->AddLine(ImVec2(c.x - r * .43f, c.y), ImVec2(c.x - r * .08f, c.y + r * .30f), ink, ui(1.5f));
+        dl->AddLine(ImVec2(c.x - r * .08f, c.y + r * .30f), ImVec2(c.x + r * .38f, c.y - r * .26f), ink, ui(1.5f));
     } else if (state == 3) {
-        dl->AddCircleFilled(c, r, ImGui::GetColorU32(BAD));
-        float d = r * 0.4f;
-        dl->AddLine(ImVec2(c.x - d, c.y - d), ImVec2(c.x + d, c.y + d), IM_COL32_WHITE, sz * 0.12f);
-        dl->AddLine(ImVec2(c.x - d, c.y + d), ImVec2(c.x + d, c.y - d), IM_COL32_WHITE, sz * 0.12f);
+        dl->AddConvexPolyFilled(points, 4, ImGui::GetColorU32(BAD));
+        float d = r * .28f;
+        dl->AddLine(ImVec2(c.x - d, c.y - d), ImVec2(c.x + d, c.y + d), ink, ui(1.5f));
+        dl->AddLine(ImVec2(c.x - d, c.y + d), ImVec2(c.x + d, c.y - d), ink, ui(1.5f));
     } else if (state == 1) {
-        float t = (float)ImGui::GetTime() * 6.0f;
-        dl->PathArcTo(c, r * 0.85f, t, t + 4.4f, 24);
-        dl->PathStroke(ImGui::GetColorU32(ACCENT), sz * 0.14f);
+        diamond(dl, c, r, r, ImGui::GetColorU32(GOLD), ui(1.4f));
+        float pulse = .72f + .20f * std::sin((float)ImGui::GetTime() * 3);
+        diamond(dl, c, r * .46f, r * .46f, ImGui::GetColorU32(ImVec4(GOLD.x, GOLD.y, GOLD.z, pulse)), ui(1));
     } else {
-        dl->AddCircle(c, r * 0.85f, ImGui::GetColorU32(MUTED), 24, sz * 0.08f);
+        diamond(dl, c, r * .76f, r * .76f, ImGui::GetColorU32(MUTED), ui(1));
     }
     ImGui::Dummy(ImVec2(sz * 1.1f, sz));
     ImGui::SameLine();
@@ -617,9 +750,9 @@ static bool button(const char* label, const ImVec2& size = ImVec2(0, 0), bool pr
     if (!enabled) ImGui::BeginDisabled();
     if (primary) {
         ImGui::PushStyleColor(ImGuiCol_Button, ACCENT);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.53f, 0.83f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.08f, 0.40f, 0.66f, 1));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.66f, 0.89f, 0.82f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.43f, 0.69f, 0.64f, 1));
+        ImGui::PushStyleColor(ImGuiCol_Text, INK);
     }
     bool pressed = ImGui::Button(label, size);
     if (primary) ImGui::PopStyleColor(4);
@@ -649,16 +782,18 @@ static bool checkbox(const char* label, bool* v) {
 }
 
 static float button_w(const char* label) {
-    return ImGui::CalcTextSize(label, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2 + 24;
+    return ImGui::CalcTextSize(label, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2 + ui(16);
 }
 
 // right-aligned row of buttons at the bottom of the window; returns the index pressed or -1
 static int footer(std::initializer_list<const char*> labels, int primary = -1, int disabled_mask = 0) {
-    float h = ImGui::GetFrameHeight() + 8;
+    float h = ImGui::GetFrameHeight() + ui(6);
     float y = ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - h;
-    float total = 0;
-    for (const char* l : labels) total += button_w(l) + ImGui::GetStyle().ItemSpacing.x;
-    ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - total, y));
+    float total = (labels.size() - 1) * ImGui::GetStyle().ItemSpacing.x;
+    for (const char* l : labels) total += button_w(l);
+    ImGui::SetCursorPos(ImVec2(std::max(ImGui::GetStyle().WindowPadding.x,
+                                       ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - total),
+                               std::max(y, ImGui::GetCursorPosY())));
     int i = 0, hit = -1;
     for (const char* l : labels) {
         if (i) ImGui::SameLine();
@@ -777,6 +912,11 @@ static void apply_dialog(const std::string& target, const std::string& path) {
     else if (target == "disc_key") set_disc_key_file(path);
     else if (target == "common_key") set_common_key_file(path);
     else if (target == "save") import_save(path);
+    else if (target == "location") {
+        A.location_ok = false;
+        A.location_msg = "Checking this folder...";
+        request("location", "\"path\":" + jstr(path));
+    }
 }
 
 static void start_install(const std::string& source) {
@@ -784,7 +924,10 @@ static void start_install(const std::string& source) {
     A.steps.clear();
     A.current = -1;
     std::string f = "\"source\":" + jstr(source);
-    if (source != "installed") f += ",\"path\":" + jstr(A.source_path);
+    if (source != "installed") {
+        f += ",\"path\":" + jstr(A.source_path);
+        if (!A.install_dir.empty()) f += ",\"data_dir\":" + jstr(A.install_dir);
+    }
     request("install", f);
     go(Screen::Installing);
 }
@@ -832,6 +975,15 @@ static void handle_reply(const J& ev) {
                                                  : "Extracted game folder: Twilight Princess HD (USA)";
         else
             A.probe_msg = "Wii U disc image. The game files are extracted from it into this folder (about 4.3 GB).";
+    } else if (cmd == "location") {
+        A.location_ok = ok;
+        if (ok) {
+            A.install_dir = ev.str("path");
+            A.location_free = ev.num("free_bytes");
+            A.location_msg.clear();
+        } else {
+            A.location_msg = ev.str("message");
+        }
     } else if (cmd == "check_keys") {
         if (ok) {
             A.keys_msg.clear();
@@ -846,7 +998,11 @@ static void handle_reply(const J& ev) {
             A.result_app = ev.str("app");
             A.toolchain_bytes = ev.num("toolchain_bytes");
             A.game_dir = ev.str("game_dir", A.game_dir);
-            g_exe = ev.str("exe"), g_game_dir = A.game_dir, g_data_dir = ev.str("data_dir", A.data_dir);
+            A.data_dir = ev.str("data_dir", A.data_dir);
+            A.log_path = ev.str("log", A.log_path);
+            A.free_bytes = ev.num("free_bytes");
+            A.install_dir.clear();
+            g_exe = ev.str("exe"), g_game_dir = A.game_dir, g_data_dir = A.data_dir;
             A.installed = true;
             addlog("Setup finished.");
             go(Screen::Done);
@@ -992,7 +1148,7 @@ static void page_header(const char* title, const std::string& sub = "") {
 
 static void log_pane(float height) {
     ImGui::BeginChild("log", ImVec2(0, height), ImGuiChildFlags_Borders);
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.28f, 0.32f, 1));
+    ImGui::PushStyleColor(ImGuiCol_Text, MUTED);
     for (auto& l : A.log) ImGui::TextUnformatted(l.c_str());
     ImGui::PopStyleColor();
     if (A.log_scroll) ImGui::SetScrollHereY(1.0f), A.log_scroll = false;
@@ -1035,50 +1191,75 @@ static void screen_clt() {
     }
 }
 
-static std::string home_folder() { return A.portable && !A.package.empty() ? A.package : A.data_dir; }
+
+static bool can_choose_location() {
+#ifdef _WIN32
+    for (const auto& arg : A.passthru)
+        if (arg == "--data-dir" || arg.rfind("--data-dir=", 0) == 0) return false;
+    return A.portable;
+#else
+    return false;
+#endif
+}
+
+static void select_location() {
+    A.location_msg.clear();
+    A.install_dir.clear();
+    A.location_ok = true;
+    go(can_choose_location() ? Screen::Location : Screen::Source);
+}
 
 static void screen_welcome() {
-    page_header("Welcome", "The Legend of Zelda: Twilight Princess HD, native macOS port " + A.version);
-    if (A.portable) {
-        ImGui::TextWrapped("The first start prepares the game once: it reads your own dump of the game and builds it for "
-                           "this computer (about two minutes). Releases never contain game code, so this happens here, "
-                           "once. After that, starting Twilight Princess HD starts the game directly.");
-    } else {
-        ImGui::TextWrapped("This installer builds the game on your computer from your own dump of the game. The "
-                           "download contains no game files, no game code and no keys.");
-    }
     ImGui::Spacing();
-    ImGui::TextUnformatted("You need:");
-    ImGui::Bullet();
-    ImGui::TextWrapped("your Twilight Princess HD (USA): a disc image (.wud/.wux), a Cemu archive (.wua), or an extracted "
-                       "folder (code, content, meta);");
-    ImGui::Bullet();
-    ImGui::TextWrapped("for a disc image, its disc key and the Wii U common key (from your console). A Cemu archive "
-                       "or an extracted folder needs no keys.");
+    ImGui::PushStyleColor(ImGuiCol_Text, GOLD);
+    heading("Prepare your copy for PC", 38);
+    ImGui::PopStyleColor();
+    muted("Setup verifies your game and builds the native application on this PC. After setup, open the same launcher to play.");
     ImGui::Spacing();
-    if (A.portable) {
-        ImGui::TextUnformatted("Space, all of it in this folder:");
-        ImGui::Bullet();
-        ImGui::TextWrapped("an extracted game folder is used where it is: nothing is copied;");
-        ImGui::Bullet();
-        ImGui::TextWrapped("a disc image or Cemu archive is extracted into the folder: about 4.3 GB;");
-        ImGui::Bullet();
-        ImGui::TextWrapped("while preparing, about 1 GB more (removed afterwards)%s.",
-#if defined(_WIN32) || (!defined(__APPLE__))
-                           ", plus the compiler download, which you can remove at the end"
-#else
-                           ""
+
+    ImGui::BeginChild("requirements", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+    heading("Before you begin", 23);
+    ImGui::TextWrapped("Twilight Princess HD for Wii U, USA Rev 2 (v81). Choose a .wud or .wux image, a .wua Cemu "
+                       "archive, or an extracted folder with code, content and meta.");
+    muted("Disc images require your disc key and Wii U common key. Your keys and game files stay on this PC.");
+#ifdef WWHD_SETUP_VULKAN_CHECK
+    static std::string gpu_details;
+    if (button("Check Vulkan compatibility", ImVec2(0, 0))) gpu_details = check_vulkan().details;
+    if (!gpu_details.empty()) ImGui::TextWrapped("%s", gpu_details.c_str());
 #endif
-        );
-        ImGui::Spacing();
-        muted("Everything stays in " + home_folder() + " (free: " + format_size(A.free_bytes) +
-              "). Nothing is written to your user folders unless you ask for a shortcut.");
-    } else {
-        muted("The game will be installed in " + A.data_dir + ". Your saves and settings there are never changed "
-              "without asking.");
-    }
+    ImGui::EndChild();
+    ImGui::Spacing();
+    muted("Windows Edition maintained by buasfe. Based on AsadSi's Twilight Princess HD recompilation, "
+          "ZeldaWWHDRecomp and the work of their contributors.");
     int b = footer({"Quit", "Continue"}, 1);
     if (b == 0) A.exit_code = 0;
+    if (b == 1) select_location();
+}
+
+static void screen_location() {
+    journey(0);
+    page_header("Choose where to install", "Setup keeps the compiled game, settings and saves in this folder.");
+    ImGui::BeginChild("destination", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+    bool custom = !A.install_dir.empty();
+    heading(custom ? "Selected folder" : A.installed ? "Current installation" : "Default folder", 23);
+    ImGui::TextWrapped("%s", (custom ? A.install_dir : A.data_dir).c_str());
+    muted(format_size(custom ? A.location_free : A.free_bytes) + " free");
+    ImGui::EndChild();
+    if (button("Choose an empty folder...", ImVec2(0, 0), A.installed, !busy())) choose_folder("location");
+    if (!A.installed && (custom || !A.location_ok)) {
+        ImGui::SameLine();
+        if (button("Use default folder", ImVec2(0, 0), false, !busy())) {
+            A.install_dir.clear();
+            A.location_msg.clear();
+            A.location_ok = true;
+        }
+    }
+    if (!A.location_msg.empty()) colored(A.location_ok || busy() ? ACCENT : BAD, A.location_msg);
+    if (A.installed) muted("Setup will build a separate copy and keep your existing installation and saves.");
+    else muted("Disc images and Cemu archives need room for the extracted files. Setup also needs free space for "
+               "the compiler and build files.");
+    int b = footer({"Back", "Continue"}, 1, !A.location_ok || busy() || (A.installed && !custom) ? 2 : 0);
+    if (b == 0) go(A.installed ? Screen::Menu : Screen::Welcome);
     if (b == 1) go(Screen::Source);
 }
 
@@ -1086,8 +1267,8 @@ static void screen_menu() {
     bool update = A.installed_version != A.version;
     page_header(A.portable ? "Twilight Princess HD" : "Twilight Princess HD is installed",
                 update ? "Prepared with " + A.installed_version + ". This release: " + A.version + "."
-                       : "Version " + A.version + ", in " + home_folder());
-    float w = 520;
+                       : "Version " + A.version + ", in " + A.data_dir);
+    float w = std::min(ui(520), ImGui::GetContentRegionAvail().x);
     if (update) {
         if (button("Update to this release", ImVec2(w, 0), true)) start_install("installed");
         muted("Rebuilds the game with this release. Your game files and saves are kept; no keys needed.");
@@ -1095,34 +1276,48 @@ static void screen_menu() {
     if (button("Play", ImVec2(w, 0), !update)) A.after = "play";
     if (button("Repair", ImVec2(w, 0))) start_install("installed");
     muted("Rebuilds the game code from the installed game files.");
-    if (button("Change the game (disc image, Cemu archive or game folder)", ImVec2(w, 0))) go(Screen::Source);
+    if (can_choose_location()) {
+        if (button("Set up in a different location", ImVec2(w, 0))) select_location();
+    } else {
+#ifndef _WIN32
+        if (button("Change the game (disc image, Cemu archive or game folder)", ImVec2(w, 0))) go(Screen::Source);
+#endif
+    }
     if (button("Import a save from Cemu or a Wii U", ImVec2(w, 0))) open_save_screen(Screen::Menu);
-    if (button("Open the folder", ImVec2(w, 0))) open_folder(home_folder());
+    if (button("Open the folder", ImVec2(w, 0))) open_folder(A.data_dir);
     if (footer({"Quit"}) == 0) A.exit_code = 0;
 }
 
 static void screen_source() {
+    journey(1);
     page_header("Choose your game",
                 "A Wii U disc image (.wux or .wud), a Cemu archive (.wua) or an already extracted game folder.");
     static const SDL_DialogFileFilter filters[] = {{"Wii U disc image or Cemu archive (.wux, .wud, .wua)", "wux;wud;wua"},
                                                    {"Wii U disc image (.wux, .wud)", "wux;wud"},
                                                    {"Cemu Wii U archive (.wua)", "wua"},
                                                    {"All files", "*"}};
-    if (button("Choose disc image or archive...", ImVec2(320, 0), A.source_path.empty()))
+    float width = ImGui::GetContentRegionAvail().x;
+    bool columns = width >= ui(670);
+    float card = columns ? (width - ImGui::GetStyle().ItemSpacing.x) / 2 : width;
+    float height = ui(columns ? 68 : 42);
+    if (button("Choose disc image or archive...", ImVec2(card, height), A.source_path.empty(), !busy()))
         choose_file("source", filters, 4);
-    ImGui::SameLine();
-    if (button("Choose extracted game folder...", ImVec2(320, 0))) choose_folder("source");
+    if (columns) ImGui::SameLine();
+    if (button("Choose extracted game folder...", ImVec2(card, height), false, !busy()))
+        choose_folder("source");
     ImGui::Spacing();
     if (!A.source_path.empty()) {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui(16), ui(12)));
         ImGui::BeginChild("src", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
         if (A.pending_cmd == "probe") mark(1);
         else mark(A.probe_ok ? 2 : 3);
         ImGui::TextWrapped("%s", A.probe_msg.c_str());
         muted(A.source_path);
         ImGui::EndChild();
+        ImGui::PopStyleVar();
     }
     int b = footer({"Back", "Next"}, 1, (A.probe_ok && !busy()) ? 0 : 2);
-    if (b == 0) go(A.installed ? Screen::Menu : Screen::Welcome);
+    if (b == 0) go(can_choose_location() ? Screen::Location : A.installed ? Screen::Menu : Screen::Welcome);
     if (b == 1) {
         if (A.source_kind == "folder" || A.source_kind == "archive") start_install(A.source_kind);  // no keys
         else go(Screen::Keys);
@@ -1135,7 +1330,8 @@ static std::string base_name(const std::string& p) {
 }
 
 static void screen_keys() {
-    page_header("Keys", base_name(A.source_path));
+    journey(1);
+    page_header("Verify disc keys", base_name(A.source_path));
     static const SDL_DialogFileFilter keyf[] = {{"Key files (.key, .bin, .txt)", "key;bin;txt"}, {"All files", "*"}};
 
     ImGui::BeginChild("disc", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
@@ -1170,11 +1366,10 @@ static void screen_keys() {
     if (A.common_mode == 0) {
         if (button("Choose key file...##common")) choose_file("common_key", keyf, 2);
         if (!A.common_key_file.empty()) {
-            ImGui::SameLine();
-            ImGui::TextUnformatted(base_name(A.common_key_file).c_str());
+            muted(base_name(A.common_key_file));
         }
     } else {
-        ImGui::SetNextItemWidth(460);
+        ImGui::SetNextItemWidth(std::min(ui(460), ImGui::GetContentRegionAvail().x));
         if (ImGui::InputTextWithHint("##paste", "32 hex digits", A.paste, sizeof A.paste,
                                      ImGuiInputTextFlags_Password | ImGuiInputTextFlags_CharsNoBlank))
             keys_changed();
@@ -1198,39 +1393,29 @@ static void screen_keys() {
     if (b == 1) check_keys();
 }
 
-static double step_weight(const std::string& id) {
-    static const std::map<std::string, double> w = {{"keys", 1},      {"archive", 1},   {"folder", 1},
-                                                    {"compiler", 3},  {"extract", 15},  {"copy", 8},
-                                                    {"translate", 8}, {"compile", 60},  {"app", 4}};
-    auto it = w.find(id);
-    return it == w.end() ? 1 : it->second;
-}
-
 static void screen_installing() {
-    if (A.portable) page_header("Preparing the game", "One time, about two minutes. You can keep using your computer.");
-    else page_header("Installing", "This takes a few minutes. You can keep using your computer.");
-    double tw = 0, dw = 0;
-    for (auto& s : A.steps) {
-        double w = step_weight(s.id);
-        tw += w;
-        if (s.state == 2) dw += w;
-        else if (s.state == 1 && s.total > 0) dw += w * std::min(1.0, s.done / s.total);
+    journey(2);
+    page_header("Building your game", "Compiling can take several minutes. You can keep using your computer.");
+    if (A.steps.empty()) {
+        mark(1);
+        ImGui::TextUnformatted("Preparing the build...");
+        return;
     }
-    ImGui::TextUnformatted("Overall");
-    ImGui::ProgressBar(tw > 0 ? (float)(dw / tw) : 0.0f, ImVec2(-1, 0));
-    ImGui::Spacing();
+    size_t finished = std::count_if(A.steps.begin(), A.steps.end(), [](const Step& step) { return step.state == 2; });
+    ImGui::TextColored(GOLD, "%zu of %zu stages complete", finished, A.steps.size());
     ImGui::BeginChild("steps", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
-    for (auto& s : A.steps) {
+    for (const auto& s : A.steps) {
         mark(s.state);
-        std::string t = s.title;
-        if (size_t paren = t.find(" ("); paren != std::string::npos) t = t.substr(0, paren);
-        if (s.state == 0) ImGui::PushStyleColor(ImGuiCol_Text, MUTED);
-        ImGui::TextUnformatted(t.c_str());
-        if (s.state == 0) ImGui::PopStyleColor();
+        std::string title = s.title.substr(0, s.title.find(" ("));
+        const ImVec4& color = s.state == 2 ? GOOD : s.state == 1 ? GOLD : s.state == 3 ? BAD : MUTED;
+        ImGui::TextColored(color, "%s", title.c_str());
         if (s.state == 1) {
-            ImGui::SameLine(380);
-            float frac = s.total > 0 ? (float)std::min(1.0, s.done / s.total) : -1.0f * (float)ImGui::GetTime();
-            ImGui::ProgressBar(frac, ImVec2(-1, 0), s.detail.empty() ? (s.total > 0 ? nullptr : "") : s.detail.c_str());
+            if (s.total > 0 && s.done < s.total) {
+                if (!s.detail.empty()) muted(s.detail);
+                progress_track(s.done / s.total);
+            } else if (!s.detail.empty()) {
+                muted("Finishing this stage...");
+            }
         }
     }
     ImGui::EndChild();
@@ -1251,7 +1436,7 @@ static void screen_error() {
     if (!rest.empty()) {
         float h = std::min(ImGui::GetTextLineHeightWithSpacing() * 8, std::max(60.0f, space_above_footer() * 0.5f));
         ImGui::BeginChild("errdetail", ImVec2(0, h), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.28f, 0.32f, 1));
+        ImGui::PushStyleColor(ImGuiCol_Text, MUTED);
         ImGui::TextUnformatted(rest.c_str());
         ImGui::PopStyleColor();
         ImGui::EndChild();
@@ -1306,7 +1491,7 @@ static void screen_done() {
     ImGui::TextWrapped(A.portable ? "The game is prepared." : "Twilight Princess HD is installed.");
     ImGui::Spacing();
     if (A.portable) {
-        muted("Everything is in " + home_folder() + ".");
+        muted("Installation and saves: " + A.data_dir);
         muted("To play, start Twilight Princess HD again: it starts the game directly. To repair, update or change the "
 #ifdef __linux__
               "game, start it with --setup (or use the shortcut's Setup action)."
@@ -1342,7 +1527,7 @@ static void screen_done() {
             "Add Twilight Princess HD to my applications menu",
 #endif
             &A.opt_shortcut);
-        muted("Off by default: then nothing is written outside this folder.");
+        muted("Optional. Adds a shortcut to this launcher.");
     }
     int b = footer({"Quit", "Open folder", "Play"}, 2, busy() || !A.after.empty() ? 7 : 0);
     auto queue_options = [] {
@@ -1351,7 +1536,7 @@ static void screen_done() {
         A.toolchain_bytes = 0, A.opt_shortcut = false;  // once
     };
     if (b == 0) queue_options(), A.after = "quit";
-    if (b == 1) open_folder(home_folder());
+    if (b == 1) open_folder(A.data_dir);
     if (b == 2) queue_options(), A.after = "play";
 }
 
@@ -1525,10 +1710,21 @@ static void fail_no_package(const PackageSearch& r) {
 // check it can be written before anything starts, so a read-only place (a disk image, a read-only drive or
 // share, a folder of another user) is reported as such and not as a failure halfway through the setup.
 static std::string data_dir_of(const std::string& pkg, const std::vector<std::string>& passthru) {
-    std::string data = pkg + "data";
-    for (size_t i = 0; i + 1 < passthru.size(); i++)
-        if (passthru[i] == "--data-dir") data = passthru[i + 1];
-    return data;
+    for (size_t i = 0; i < passthru.size(); i++) {
+        if (passthru[i] == "--data-dir" && i + 1 < passthru.size()) return passthru[i + 1];
+        if (passthru[i].rfind("--data-dir=", 0) == 0) return passthru[i].substr(11);
+    }
+#ifdef _WIN32
+    J saved;
+    if (parse_json(read_file(pkg + "setup-location.json"), saved)) {
+        std::string path = saved.str("data_dir");
+        if (!path.empty()) {
+            bool absolute = path[0] == '/' || path[0] == '\\' || (path.size() > 1 && path[1] == ':');
+            return absolute ? path : pkg + path;
+        }
+    }
+#endif
+    return pkg + "data";
 }
 
 static bool check_writable(const std::string& data) {
@@ -1682,6 +1878,7 @@ static void automation_frame() {
             const std::string& k = kv.first;
             const std::string v = kv.second.t == J::Str ? kv.second.s : "";
             if (k == "source") set_source(v);
+            else if (k == "location") apply_dialog(k, v);
             else if (k == "disc_key_file") set_disc_key_file(v);
             else if (k == "common_key_file") set_common_key_file(v);
             else if (k == "common_mode") set_common_mode(v == "paste" ? 1 : 0);
@@ -1689,6 +1886,8 @@ static void automation_frame() {
             else if (k == "open_details") details_open = true;
         }
     }
+    if (A.stable_frames == 0 && st.num("width") > 0 && st.num("height") > 0)
+        SDL_SetWindowSize(g_window, (int)st.num("width"), (int)st.num("height"));
     A.stable_frames++;  // frames on this screen (the "set" above runs once, at 0)
     if (st.boolean("idle") && busy()) return;
     if (!st.str("when_step").empty()) {
@@ -1722,9 +1921,7 @@ static void save_shot(SDL_Renderer* r, const std::string& name) {
 static bool game_ready(const std::string& pkg, const std::vector<std::string>& passthru) {
     SDL_PathInfo info;
     if (!SDL_GetPathInfo((pkg + "portable.txt").c_str(), &info)) return false;  // only portable releases
-    std::string data = pkg + "data";
-    for (size_t i = 0; i + 1 < passthru.size(); i++)
-        if (passthru[i] == "--data-dir") data = passthru[i + 1];
+    std::string data = data_dir_of(pkg, passthru);
     J st, man;
     if (!parse_json(read_file(data + "/install.json"), st) || !parse_json(read_file(pkg + "sdk/manifest.json"), man))
         return false;
@@ -1742,6 +1939,13 @@ static bool game_ready(const std::string& pkg, const std::vector<std::string>& p
 }
 
 int main(int argc, char** argv) {
+#ifdef WWHD_SETUP_VULKAN_CHECK
+    if (argc == 2 && !strcmp(argv[1], "--vulkan-check")) {
+        const auto result = check_vulkan();
+        SDL_Log("%s", result.details.c_str());
+        return result.compatible ? 0 : 1;
+    }
+#endif
 #ifdef _WIN32
     if (argc > 1 && !strcmp(argv[1], "--console-setup")) {
         return console_setup(find_package().pkg, std::vector<std::string>(argv + 2, argv + argc));
@@ -1774,13 +1978,14 @@ int main(int argc, char** argv) {
         if (!pkg.empty() && game_ready(pkg, A.passthru) && launch_game()) return 0;
     }
 
-    SDL_SetHint(SDL_HINT_APP_NAME, "Twilight Princess HD");
+    SDL_SetHint(SDL_HINT_APP_NAME, "Twilight Princess HD: Recompiled");
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("SDL_Init: %s", SDL_GetError());
         return 1;
     }
     bool offscreen = SDL_GetCurrentVideoDriver() && !strcmp(SDL_GetCurrentVideoDriver(), "offscreen");
-    if (offscreen) SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");  // tests and CI: no GPU, nothing on screen
+    if (offscreen) SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+    else if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) SDL_Log("Gamepad initialization: %s", SDL_GetError());  // tests and CI: no GPU, nothing on screen
     float scale = offscreen ? 1.0f : SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
     if (scale <= 0) scale = 1.0f;
     {
@@ -1799,7 +2004,7 @@ int main(int argc, char** argv) {
         SDL_Log("SDL_CreateWindow: %s", SDL_GetError());
         return 1;
     }
-    SDL_SetWindowMinimumSize(g_window, (int)(760 * scale), (int)(560 * scale));
+    SDL_SetWindowMinimumSize(g_window, (int)(640 * scale), (int)(500 * scale));
     SDL_Renderer* renderer = SDL_CreateRenderer(g_window, offscreen ? "software" : nullptr);
     if (!renderer) {
         SDL_Log("SDL_CreateRenderer: %s", SDL_GetError());
@@ -1807,15 +2012,16 @@ int main(int argc, char** argv) {
     }
     SDL_SetRenderVSync(renderer, 1);
     SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
-    SDL_ShowWindow(g_window);
+    if (!offscreen) SDL_ShowWindow(g_window);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     apply_style(scale);
-    load_fonts(scale);
+    load_fonts();
     ImGui_ImplSDL3_InitForSDLRenderer(g_window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
@@ -1823,7 +2029,7 @@ int main(int argc, char** argv) {
     A.pkg = found.pkg;
     if (!A.pkg.empty()) {
         A.version = package_version();
-        if (!A.version.empty()) SDL_SetWindowTitle(g_window, ("Twilight Princess HD " + A.version).c_str());
+        if (!A.version.empty()) SDL_SetWindowTitle(g_window, ("Twilight Princess HD: Recompiled - " + A.version).c_str());
         if (found.translocated)
             addlog("macOS started a temporary copy of the app (App Translocation); the release folder is " + A.pkg);
     }
@@ -1847,7 +2053,7 @@ int main(int argc, char** argv) {
         SDL_Event ev;
         bool idle = A.script.t != J::Arr && !A.self_test && A.screen != Screen::Installing && A.screen != Screen::Starting &&
                     !busy() && A.screen != Screen::NeedCLT;
-        if (idle) SDL_WaitEventTimeout(nullptr, 100);
+        if (idle) SDL_WaitEventTimeout(nullptr, 35);
         while (SDL_PollEvent(&ev)) {
             ImGui_ImplSDL3_ProcessEvent(&ev);
             if (ev.type == SDL_EVENT_QUIT || (ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && ev.window.windowID == SDL_GetWindowID(g_window)))
@@ -1865,19 +2071,34 @@ int main(int argc, char** argv) {
         }
         automation_frame();
 
+        if (!offscreen) {
+            float current_scale = SDL_GetWindowDisplayScale(g_window);
+            if (current_scale > 0 && current_scale != scale) {
+                scale = current_scale;
+                ImGui::GetStyle() = ImGuiStyle();
+                apply_style(scale);
+            }
+        }
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
+        if (A.reset_scroll) {
+            ImGui::SetNextWindowScroll(ImVec2(0, 0));
+            A.reset_scroll = false;
+        }
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("##main", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                         ImGuiWindowFlags_NoBringToFrontOnFocus);
+                         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoBackground);
+        atmosphere();
+        masthead();
         switch (A.screen) {
         case Screen::Starting: screen_starting(); break;
         case Screen::NeedCLT: screen_clt(); break;
         case Screen::Menu: screen_menu(); break;
         case Screen::Welcome: screen_welcome(); break;
+        case Screen::Location: screen_location(); break;
         case Screen::Source: screen_source(); break;
         case Screen::Keys: screen_keys(); break;
         case Screen::Installing: screen_installing(); break;
@@ -1911,7 +2132,7 @@ int main(int argc, char** argv) {
         ImGui::Render();
 
         SDL_SetRenderScale(renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
-        SDL_SetRenderDrawColor(renderer, 248, 250, 251, 255);
+        SDL_SetRenderDrawColor(renderer, 15, 22, 24, 255);
         SDL_RenderClear(renderer);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
         if (!A.shot_pending.empty()) {
@@ -1935,6 +2156,7 @@ int main(int argc, char** argv) {
             }
         }
         SDL_RenderPresent(renderer);
+        if (offscreen) SDL_Delay(8);
         if (A.last_screen != screen_name(A.screen)) {
             A.last_screen = screen_name(A.screen);
             if (A.script.t == J::Arr || A.self_test) SDL_Log("screen: %s", A.last_screen.c_str());

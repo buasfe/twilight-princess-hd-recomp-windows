@@ -5,6 +5,7 @@
 #include "write_watch.h"
 #include "shaders.h"
 #include "gx2/gx2.h"
+#include "gx2_texture_regs.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "runtime.h"
 #include <algorithm>
@@ -520,6 +521,45 @@ void dynamic_uniform_check(Surface& s) {
  }
  fprintf(stderr,"[renderer smoke] dynamic UBO immutable draws, VS/PS binding order and fresh sets after pool reset passed\n");
 }
+void television_scale_check() {
+    const auto cb_addr = mem::host_alloc(sizeof(GX2::GX2ColorBuffer), 256);
+    auto* cb = reinterpret_cast<GX2::GX2ColorBuffer*>(mem::ptr(cb_addr));
+    *cb = {};
+    cb->surface.dim = Latte::E_DIM::DIM_2D;
+    cb->surface.format = static_cast<Latte::E_GX2SURFFMT>(0x1a);
+    cb->surface.depth = 1;
+    cb->viewNumSlices = 1;
+    const uint32_t color = mem::host_alloc(1920 * 1080 * 4, 256);
+    const float transparent[4]{};
+    // Use the same color-buffer resolve and scan-out copy as GX2. Reduced
+    // post-process buffers should retain their proportions at higher scales.
+    for (const uint32_t width : {480u, 960u, 1920u}) {
+        const uint32_t height = width * 9 / 16;
+        cb->surface.width = cb->surface.pitch = width;
+        cb->surface.height = height;
+        cb->surface.imagePtr = color;
+        set_res_scale(2);
+        for (const float aspect : {16.0f / 9.0f, 64.0f / 27.0f}) {
+            set_frame_aspect(aspect);
+            latch_res_scale();
+            clear_color(nullptr, cb_addr, transparent);
+            const auto* target = surface_from_color_buffer(cb_addr);
+            const auto expected_width = width * 2 * (aspect > 2 ? 4 : 3) / 3;
+            require(target && target->extent.width == expected_width &&
+                    target->extent.height == height * 2, "2x TV color target has the wrong extent");
+            if (width == 1920) {
+                copy_to_scan(cb_addr, 1);
+                require(R.tv.scan && R.tv.scan->extent.width == expected_width &&
+                        R.tv.scan->extent.height == height * 2, "scan-out reduced the 2x TV image");
+            }
+        }
+        flush();
+    }
+    set_frame_aspect(16.0f / 9.0f);
+    set_res_scale(1);
+    latch_res_scale();
+    fprintf(stderr, "[renderer smoke] 2x TV scan-out and reduced render targets retain their size and aspect\n");
+}
 }
 int renderer_smoke_test() {
  try {
@@ -615,6 +655,7 @@ int renderer_smoke_test() {
    fprintf(stderr,"[renderer smoke] depth/stencil upload and clear passed\n");
    depth_copy_check();
    volume_target_check();
+   television_scale_check();
    Image rendered(64,64,0x1a);dynamic_uniform_check(rendered.s);vertex_window_check(rendered.s);triangle(rendered.s);
    if(R.tv.scan)destroy_surface_image(R.tv.scan.get());R.tv.scan=std::make_unique<Surface>();auto& scan=*R.tv.scan;scan.width=64;scan.height=64;scan.format=0x1a;scan.fmt=format_info(scan.format,false);create_surface_image(&scan,false);resample(&rendered.s,&scan,1);mark_gpu_written(&scan);
    auto capturePath=std::filesystem::temp_directory_path()/("wwhd-vulkan-smoke-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".png");

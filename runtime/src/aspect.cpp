@@ -6,6 +6,7 @@
 // targets get as much wider or taller (gfx/metal_surfaces.mm), so the game draws the new shape and lays out its
 // HUD to its edges.
 #include "aspect.h"
+#include "button_glyphs.h"
 
 #include <algorithm>
 #include <atomic>
@@ -112,15 +113,16 @@ void service(Cpu* c) {
 //   menu, whose art lines up with its text, shows black at the sides). Pictures beside the layout (off screen at
 //   16:9) keep the full stretch and stay off screen, and so do a screen's top layers that reach well past both
 //   edges (fills made to cover any screen). A full-screen menu (a top layer from an edge past the middle) has the presenter
-//   paint the TV picture black beside it (full_menu). Where the game asks for a menu pane's place on screen
-//   (CPaneMgr::getGlobalVtx, 02A95A78: the field map's clip rectangle and icons) it gets the centered place; the
-//   field map's art, drawn through the 2D port (whose ortho spans the screen), is at 16:9's proportions by itself.
+//   paint the TV picture black beside it (full_menu). Pane queries stay in layout space so separate
+//   cursor and content screens receive the same centering. Map clipping and markers drawn directly
+//   through the 2D port use the centered screen position instead.
 // The GamePad's screens are left alone.
 namespace {
 constexpr uint32_t kN43 = 0x6E5F3433;  // 'n_43': HD undoes the stretch for this pane
 enum Screen { kMenu, kHud, kGamePad };
 int g_screen = kMenu;  // the screen being drawn, from its root's caller
 int g_full = 0;        // > 0: inside a pane drawn at the full stretch (a menu's backdrop)
+bool g_dialogue_glow = false;
 std::unordered_map<uint32_t, int> g_tv_screens;  // root pane -> how it was last drawn on the TV
 
 int screen_of(uint32_t sp) {  // the callers' return addresses, up the stack's back chain
@@ -149,9 +151,31 @@ bool unstretched(uint32_t p) {
     return false;
 }
 bool dpad_group(uint32_t p) { return p && ld64(p + 8) == 0x6A756A695F6EULL; }  // juji_n: the D-pad and its labels
+
+bool map_screen_coordinates(uint32_t sp, uint32_t caller) {
+    // Unwrap getGlobalVtxCenter's two corner reads to identify their consumer.
+    if (caller == 0x02A95E3C || caller == 0x02A95E5C) {
+        const uint32_t frame = sp ? ld32(sp) : 0;
+        caller = frame ? ld32(frame + 4) : 0;
+    }
+    // Map geometry queries with screen-space consumers, verified against the
+    // USA v81 map render paths. Ordinary J2D layout uses the getter as-is.
+    return (caller >= 0x029506E0 && caller <= 0x0295EDA4) ||  // map panes, including GamePad variants
+           (caller >= 0x029BDF54 && caller <= 0x029C1410) ||  // dungeon map screen geometry
+           caller == 0x029C5B60 || caller == 0x029C5B80 ||  // dungeon map clip corners
+           (caller >= 0x029DB43C && caller <= 0x029E25C8);   // field map positions and clip
+}
 }  // namespace
 
 extern "C" void f_02B34334_orig(Cpu* c);
+extern "C" void f_02B433DC_orig(Cpu* c);
+void aspect::draw_dialogue_glow(Cpu* c) {
+    const bool outer = g_dialogue_glow;
+    g_dialogue_glow = true;
+    f_02B433DC_orig(c);
+    g_dialogue_glow = outer;
+}
+
 namespace {
 using Saved = std::vector<std::pair<uint32_t, uint32_t>>;  // (address, word) to put back after a draw, last first
 // a pane (not a root) drawn for the TV's shape, with what it changed in `saved`
@@ -168,6 +192,15 @@ void draw_wide(Cpu* c, uint32_t pane, uint32_t ctx, uint32_t parent, Saved& save
     };
     int full = 0;
     if (g_screen == kMenu) {
+        if (g_dialogue_glow && ld64(pane + 8) == 0x6D6F79613030ULL) {  // moya00
+            // The per-character X already contains the text renderer's
+            // aspect adjustment. Cancel the second centering for the anchor
+            // while retaining the centered scale of the glow artwork.
+            const double x = ldf32(pane + 0xCC);
+            const double dx = (x - 304) * (1.0 / k - 1.0);
+            set(pane + 0xCC, x + dx);
+            set(pane + 0x54, ldf32(pane + 0x54) + dx);
+        }
         // the field map's cursor ('f_po_n' in zelda_field_map_point_cursor.blo) is moved to a place HD reckons with
         // the full stretch: its origin goes where the unsqueezed parent puts it (its shape as any pane's, below)
         if (ld64(pane + 8) == 0x665F706F5F6EULL) {
@@ -233,6 +266,7 @@ void draw_wide(Cpu* c, uint32_t pane, uint32_t ctx, uint32_t parent, Saved& save
 
 extern "C" void hook_02B34334(Cpu* c) {
     const uint32_t pane = c->r[3], ctx = c->r[4], parent = parent_of(pane);
+    if(!parent)button_glyphs::refresh(c);
     Saved saved;
     interp::blend_pane(pane, saved);  // between the last two steps on hold passes (interp.cpp); a root's alpha fades whole screens
     if (!parent) {  // a screen's root
@@ -253,6 +287,7 @@ extern "C" void hook_02B34334(Cpu* c) {
 extern "C" void f_02A95A78_orig(Cpu* c);
 extern "C" void hook_02A95A78(Cpu* c) {  // CPaneMgr::getGlobalVtx(Vec* out, CPaneMgr*, J2DPane*, Mtx*, u8 corner, ...)
     const uint32_t out = c->r[3], sp = c->r[1];
+    if (!map_screen_coordinates(sp, c->lr)) return f_02A95A78_orig(c);
     uint32_t root = c->r[5];
     for (uint32_t p = root; p; p = parent_of(p)) root = p;
     f_02A95A78_orig(c);

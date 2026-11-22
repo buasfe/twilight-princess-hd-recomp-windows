@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Unit tests for the installer's helpers (no game files, no network): python3 test_setup.py"""
 import hashlib
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
+from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import setup  # noqa: E402
@@ -66,6 +70,61 @@ class Paths(unittest.TestCase):
                 f.write('<menu><title_id type="hexBinary" length="8">000500001019E500</title_id></menu>')
             self.assertTrue(setup.valid_game_folder(d))
             self.assertEqual(setup.game_folder_title(d), "000500001019e500")
+
+
+class InstallLocation(unittest.TestCase):
+    def test_refuses_occupied_or_current_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = Path(tmp) / "current"
+            chosen = Path(tmp) / "new"
+            current.mkdir()
+            chosen.mkdir()
+            self.assertEqual(setup.check_install_location(str(chosen), str(current)), os.path.realpath(chosen))
+            with self.assertRaisesRegex(setup.SetupError, "current installation"):
+                setup.check_install_location(str(current), str(current))
+            (chosen / "existing.txt").touch()
+            with self.assertRaisesRegex(setup.SetupError, "already contains files"):
+                setup.check_install_location(str(chosen), str(current))
+
+    def test_failed_install_keeps_previous_location_and_can_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original = root / "original"
+            destination = root / "new installation"
+            destination.mkdir()
+            manifest = {"version": "test", "platform": "windows-x86_64", "exe": "test.exe", "toolchain": "test"}
+            log = setup.Log()
+            try:
+                with mock.patch.multiple(setup, LOG=log, PKG=tmp, PORTABLE=True, IS_WIN=True, GUI=None), \
+                        mock.patch.object(setup, "load_manifest", return_value=manifest), \
+                        mock.patch.object(setup, "cemu_save", return_value=""):
+                    setup.remember_location(str(original))
+                    pointer = Path(setup.location_file())
+                    before = pointer.read_bytes()
+                    path = os.path.realpath(destination)
+                    request = {"cmd": "install", "source": "folder", "path": "fixture", "data_dir": path}
+                    requests = [{"cmd": "location", "path": path}, request, request]
+
+                    def fake_install(ctx, *_):
+                        self.assertEqual(ctx.data_dir, path)
+                        self.assertEqual(pointer.read_bytes(), before)
+                        if not (destination / "attempt").exists():
+                            (destination / "attempt").touch()
+                            raise setup.SetupError("synthetic failure")
+                        return {"exe": ctx.exe}
+
+                    stdin = io.StringIO("".join(json.dumps(req) + "\n" for req in requests))
+                    stdout = io.StringIO()
+                    with mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", stdout), \
+                            mock.patch.object(setup, "install", side_effect=fake_install):
+                        self.assertEqual(setup.gui_main(Namespace(data_dir=None, app_dir=None)), 0)
+                    replies = [ev for ev in map(json.loads, stdout.getvalue().splitlines()) if ev["event"] == "reply"]
+                    self.assertEqual([r["ok"] for r in replies], [True, False, True])
+                    self.assertEqual(replies[1]["message"], "synthetic failure")
+                    self.assertEqual(os.path.normcase(setup.default_data_dir()), os.path.normcase(path))
+            finally:
+                if log.f:
+                    log.f.close()
 
 
 class Titles(unittest.TestCase):
@@ -212,6 +271,13 @@ class Recipe(unittest.TestCase):
     def test_jobs(self):
         self.assertGreaterEqual(setup.default_jobs(), 1)
 
+    def test_windows_jobs_reserves_available_memory(self):
+        gib = 1 << 30
+        for cpus, available, expected in ((8, 12*gib, 5), (8, 4*gib, 1),
+                                          (8, 2*gib, 1), (8, None, 2), (2, 12*gib, 2)):
+            with self.subTest(cpus=cpus, available=available):
+                self.assertEqual(setup.windows_jobs(cpus, available), expected)
+
 
 class Arch(unittest.TestCase):
     def test_normalize(self):
@@ -303,6 +369,25 @@ def _cemu_save(root, logs=("ZTP00.dat", "ZTP02.dat"), fill=b"\1"):
         _write(os.path.join(title, "user", "80000001", n), fill * setup.QUEST_LOG_BYTES)
     _write(os.path.join(title, "user", "80000001", "COMMON.dat"), b"made-up common")
     return title
+
+
+class WindowsPackageLayout(unittest.TestCase):
+    def test_rejects_guest_binary_and_wrong_sdk_location(self):
+        from importlib import util
+
+        guard_path = Path(__file__).resolve().parents[1] / "release" / "guard.py"
+        spec = util.spec_from_file_location("release_guard", guard_path)
+        guard = util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        good = guard.WINDOWS_REQUIRED | {"sdk/obj/runtime_src_core.cpp.obj", "sdk/obj/generated_build_info.cpp.obj", "sdk/lib/libimgui.a"}
+        problems = []
+        guard.check_windows_layout(good, problems)
+        self.assertEqual(problems, [])
+
+        guard.check_windows_layout(good | {"sdk/runtime/wwhd.exe", "sdk/obj/gamecode.obj"}, problems)
+        self.assertEqual(len(problems), 2)
+        self.assertTrue(any("wwhd.exe" in s for s in problems))
+        self.assertTrue(any("gamecode.obj" in s for s in problems))
 
 
 class SaveImport(unittest.TestCase):
