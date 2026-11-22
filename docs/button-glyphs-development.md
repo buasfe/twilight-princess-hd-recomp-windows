@@ -6,8 +6,10 @@ The Windows Vulkan candidate verifies live Xbox, PlayStation and Original Wii U 
 Quest Log and the 21:9 Ordon gameplay HUD. This validation used local frame captures and Vulkan
 sample traces. The tests also cover
 rebound inputs, hotplug policy, BFN reading, glyph generation and returning to the original
-image addresses. Visual checks used explicit prompt styles in Pro Controller gameplay.
-Physical DualSense detection and every dialogue or HUD context were outside this validation.
+image addresses. The maintainer has also confirmed controller input and PlayStation prompts
+through extensive use of a physical PS5 DualSense. The focused style checks used manual
+selection in Pro Controller gameplay. A dedicated check of automatic style selection on
+a physical DualSense and broader dialogue and HUD coverage are still open.
 
 F1 > Controls > Button prompts selects the appearance independently of the bindings and the
 emulated Wii U controller. Auto uses the detected family. Manual Xbox or PlayStation can
