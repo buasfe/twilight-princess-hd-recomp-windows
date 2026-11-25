@@ -370,7 +370,7 @@ static bool shift_held() {
 // ---------------------------------------------------------------------------------------------
 // state
 
-enum class Screen { Starting, NeedCLT, Menu, Welcome, Location, Source, Keys, Installing, Error, Save, Done, Fatal };
+enum class Screen { Starting, NeedCLT, Menu, Welcome, Location, Source, Keys, Installing, Error, Save, Cinematic, Done, Fatal };
 
 static const char* screen_name(Screen s) {
     switch (s) {
@@ -384,6 +384,7 @@ static const char* screen_name(Screen s) {
     case Screen::Installing: return "installing";
     case Screen::Error: return "error";
     case Screen::Save: return "save";
+    case Screen::Cinematic: return "cinematic";
     case Screen::Done: return "done";
     case Screen::Fatal: return "fatal";
     }
@@ -449,6 +450,12 @@ struct App {
     std::string cemu_save, save_msg;  // cemu_save: Cemu's save of the game, when setup.py found one
     bool save_ok = false;
     Screen save_back = Screen::Menu;
+
+#ifdef _WIN32
+    std::string cinematic_iso, cinematic_ffmpeg, cinematic_message;
+    bool cinematic_ready = false, cinematic_ok = false;
+    Screen cinematic_back = Screen::Menu;
+#endif
 
     // log
     std::vector<std::string> log;
@@ -906,12 +913,31 @@ static void open_save_screen(Screen back) {
     A.save_back = back, A.save_msg.clear();
     go(Screen::Save);
 }
+#ifdef _WIN32
+static void open_cinematic_screen(Screen back) {
+    A.cinematic_back = back;
+    A.cinematic_ready = false;
+    A.cinematic_message.clear();
+    request("get_cinematic", "");
+    go(Screen::Cinematic);
+}
+#endif
+
 static void apply_dialog(const std::string& target, const std::string& path) {
     if (path.empty()) return;
     if (target == "source") set_source(path);
     else if (target == "disc_key") set_disc_key_file(path);
     else if (target == "common_key") set_common_key_file(path);
     else if (target == "save") import_save(path);
+#ifdef _WIN32
+    else if (target == "cinematic_iso") {
+        A.cinematic_iso = path;
+        A.cinematic_message.clear();
+    } else if (target == "cinematic_ffmpeg") {
+        A.cinematic_ffmpeg = path;
+        A.cinematic_message.clear();
+    }
+#endif
     else if (target == "location") {
         A.location_ok = false;
         A.location_msg = "Checking this folder...";
@@ -1017,6 +1043,20 @@ static void handle_reply(const J& ev) {
     } else if (cmd == "import_save") {
         A.save_ok = ok;
         A.save_msg = ev.str("message");
+#ifdef _WIN32
+    } else if (cmd == "get_cinematic") {
+        A.cinematic_ready = A.cinematic_ok = ok;
+        A.cinematic_iso = ev.str("iso");
+        A.cinematic_ffmpeg = ev.str("ffmpeg");
+        A.cinematic_message = ev.str("message");
+    } else if (cmd == "set_cinematic") {
+        A.cinematic_ok = ok;
+        if (ok) {
+            A.cinematic_iso = ev.str("iso");
+            A.cinematic_ffmpeg = ev.str("ffmpeg");
+        }
+        A.cinematic_message = ev.str("message");
+#endif
     }
 }
 
@@ -1231,6 +1271,9 @@ static void screen_welcome() {
     ImGui::Spacing();
     muted("Windows Edition maintained by buasfe. Based on AsadSi's Twilight Princess HD recompilation, "
           "ZeldaWWHDRecomp and the work of their contributors.");
+#ifdef _WIN32
+    muted("By continuing, you agree to the Microsoft Distributable Code restrictions in tools/python/LICENSE.txt.");
+#endif
     int b = footer({"Quit", "Continue"}, 1);
     if (b == 0) A.exit_code = 0;
     if (b == 1) select_location();
@@ -1284,6 +1327,9 @@ static void screen_menu() {
 #endif
     }
     if (button("Import a save from Cemu or a Wii U", ImVec2(w, 0))) open_save_screen(Screen::Menu);
+#ifdef _WIN32
+    if (button("Title-screen cinematic", ImVec2(w, 0))) open_cinematic_screen(Screen::Menu);
+#endif
     if (button("Open the folder", ImVec2(w, 0))) open_folder(A.data_dir);
     if (footer({"Quit"}) == 0) A.exit_code = 0;
 }
@@ -1485,6 +1531,35 @@ static void screen_save() {
     if (footer({"Back"}, -1, busy() ? 1 : 0) == 0) go(A.save_back);
 }
 
+static void screen_cinematic() {
+#ifdef _WIN32
+    page_header("Title-screen cinematic", "Optional. Use your own USA Twilight Princess GameCube ISO. "
+                "The cinematic plays when the title screen is left idle.");
+    static const SDL_DialogFileFilter iso_filter[] = {{"GameCube ISO (.iso)", "iso"}};
+    static const SDL_DialogFileFilter ffmpeg_filter[] = {{"FFmpeg executable (.exe)", "exe"}};
+    const bool editable = A.cinematic_ready && !busy();
+    if (button("Choose GameCube ISO...", ImVec2(0, 0), false, editable))
+        choose_file("cinematic_iso", iso_filter, 1);
+    muted(A.cinematic_iso.empty() ? "Wii U title screen" : A.cinematic_iso);
+    if (button("Choose FFmpeg...", ImVec2(0, 0), false, editable))
+        choose_file("cinematic_ffmpeg", ffmpeg_filter, 1);
+    muted(A.cinematic_ffmpeg.empty() ? "Uses FFmpeg on PATH" : A.cinematic_ffmpeg);
+    if (!A.cinematic_ffmpeg.empty() && button("Use FFmpeg on PATH", ImVec2(0, 0), false, editable)) {
+        A.cinematic_ffmpeg.clear();
+        A.cinematic_message.clear();
+    }
+    if (button("Apply GameCube cinematic", ImVec2(0, 0), true, editable && !A.cinematic_iso.empty()))
+        request("set_cinematic", "\"iso\":" + jstr(A.cinematic_iso) + ",\"ffmpeg\":" + jstr(A.cinematic_ffmpeg));
+    if (button("Use Wii U title screen", ImVec2(0, 0), false, editable))
+        request("set_cinematic", "");
+    if (!A.cinematic_message.empty()) {
+        mark(A.cinematic_ok ? 2 : 3);
+        ImGui::TextWrapped("%s", A.cinematic_message.c_str());
+    }
+    if (footer({"Back"}, -1, busy() ? 1 : 0) == 0) go(A.cinematic_back);
+#endif
+}
+
 static void screen_done() {
     page_header("Ready to play");
     mark(2);
@@ -1511,6 +1586,10 @@ static void screen_done() {
     }
     if (button("Import a save from Cemu or a Wii U", ImVec2(0, 0), false, !busy() && A.after.empty()))
         open_save_screen(Screen::Done);
+#ifdef _WIN32
+    if (button("Title-screen cinematic", ImVec2(0, 0), false, !busy() && A.after.empty()))
+        open_cinematic_screen(Screen::Done);
+#endif
     if (A.portable) {
         ImGui::Spacing();
         if (A.toolchain_bytes > 0) {
@@ -1878,6 +1957,7 @@ static void automation_frame() {
             const std::string& k = kv.first;
             const std::string v = kv.second.t == J::Str ? kv.second.s : "";
             if (k == "source") set_source(v);
+            else if (k == "cinematic_iso" || k == "cinematic_ffmpeg") apply_dialog(k, v);
             else if (k == "location") apply_dialog(k, v);
             else if (k == "disc_key_file") set_disc_key_file(v);
             else if (k == "common_key_file") set_common_key_file(v);
@@ -2104,6 +2184,7 @@ int main(int argc, char** argv) {
         case Screen::Installing: screen_installing(); break;
         case Screen::Error: screen_error(); break;
         case Screen::Save: screen_save(); break;
+        case Screen::Cinematic: screen_cinematic(); break;
         case Screen::Done: screen_done(); break;
         case Screen::Fatal: screen_fatal(); break;
         }

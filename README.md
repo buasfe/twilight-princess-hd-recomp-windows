@@ -2,11 +2,21 @@
 
 Windows Edition is a native Windows x86-64 Vulkan recompilation maintained by [buasfe](https://github.com/buasfe). It builds on [AsadSi’s Twilight Princess HD recompilation](https://github.com/AsadSi/twilight-princess-hd-recomp) and the [ZeldaWWHDRecomp](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp) recompiler, Cafe OS runtime and graphics infrastructure. Setup verifies and translates the Wii U executable from your own game dump, then links it with the native runtime on your PC.
 
-The published [20th Anniversary Preview](https://github.com/buasfe/twilight-princess-hd-recomp-windows/releases/tag/v0.1.0-windows-preview.1) is a source-only release. This page also tracks newer development source and the private builds used to test it. Follow the [Windows build guide](docs/windows.md) to build from source.
-
 ## Windows setup
 
-The themed setup app guides you through choosing an install location and game files, checking the Vulkan driver, and compiling the game with the pinned LLVM-MinGW toolchain. The same launcher opens the installed game. Setup can also repair an installation or import a compatible Wii U or Cemu save, with a backup of an existing save on import. The installer theme and emblem were made for this project.
+**[Download TwilightPrincessHD-Windows-Setup-x64.zip](https://github.com/buasfe/twilight-princess-hd-recomp-windows/releases/download/v0.1.0-windows-setup.1/TwilightPrincessHD-Windows-Setup-x64.zip)**
+
+This experimental Windows 11 x86-64 preview requires a compatible Vulkan driver, an internet connection for the first build, and your own copy of **Twilight Princess HD for Wii U, USA Rev 2 (v81)**.
+
+1. Extract the entire ZIP into a writable folder and open **Twilight Princess HD.exe**.
+2. Choose an install folder and point Setup at your Wii U game files. An extracted folder with **code**, **content** and **meta** is the simplest input.
+3. Let Setup download and verify the compiler, then build the game locally. Open the same launcher again to play.
+
+To optionally use the GameCube cinematic, choose **Title-screen cinematic** when setup finishes or hold **Shift** while opening the launcher. Select your own USA GameCube ISO and a local copy of FFmpeg. The default is the normal Wii U title screen. [Cinematic setup](docs/title-attract-movie.md)
+
+The ZIP includes the builder, tools and runtime components. Your game files, locally compiled executable and cinematic stay on your PC. Hold **Shift** or pass **--setup** to repair an install, use a different folder or import a Wii U or Cemu save.
+
+By using the Windows setup, you agree to the Microsoft Distributable Code restrictions in the bundled Python licence. [Python licence and third-party terms](https://docs.python.org/3.13/license.html)
 
 ![The Windows setup welcome screen](docs/installer/welcome.png)
 
@@ -14,7 +24,7 @@ The themed setup app guides you through choosing an install location and game fi
 | --- | --- |
 | ![File selection for a disc image, Cemu archive or extracted game folder](docs/installer/game-files.png) | ![The setup progress screen during a local game build](docs/installer/build-progress.png) |
 
-These screenshots show the installer used during development. When a setup build is released, look under [Releases](https://github.com/buasfe/twilight-princess-hd-recomp-windows/releases) for an explicitly named **TwilightPrincessHD-Windows-Setup-x64.zip** asset. GitHub’s **Source code (zip)** is for building from source.
+The original source release is still available. [20th Anniversary Preview](https://github.com/buasfe/twilight-princess-hd-recomp-windows/releases/tag/v0.1.0-windows-preview.1)
 
 ## Development progress
 
@@ -24,7 +34,7 @@ These screenshots show the installer used during development. When a setup build
 | Controllers and button prompts | Xbox Series input was tested in Wii U GamePad and Pro Controller modes. The maintainer also used a physical PS5 DualSense extensively and confirmed that controller input and PlayStation prompts work. F1 **Controls** manages controller mode, bindings, dead zones and prompt style. The controller fixes cover reconnects, input after closing F1 and idle menu scrolling. Binding-aware Xbox, PlayStation and Original Wii U prompts were visually checked in the Ordon HUD and Quest Log. Tests cover custom bindings and hotplug policy. Automatic PlayStation style selection on a physical DualSense still needs a dedicated check with F1 set to **Auto**. |
 | 60 FPS HUD and animation | In Windows/Vulkan previews, dialogue glow remained steady and Epona’s spur icons stayed in place. A later preview confirmed the reins no longer jumped between 60 FPS frames, with the original occasional clipping still visible. The 60, 120 and 240 FPS options interpolate presentation from the original 30 Hz gameplay clock. |
 | Ultrawide UI | The 21:9 dialogue glow and the farmer’s Yes/No selection markers were visually verified. The latest shared selection-coordinate change covers the Collection grid and startup controller selector, with focused tests for cursor anchors. A full visual pass across menus and additional aspect ratios remains open. |
-| Title-screen cinematics | Isolated previews confirmed that the original GameCube trailer plays from a local ISO after the HD opening and returns to the opening. The maintainer also confirmed controller skipping with a DualSense and checked picture and audio sync for optional local HD video playback. The final private package passed headless installation and decoding checks. Automatic playback in that exact build still needs an in-game check. |
+| Title-screen cinematics | Earlier isolated previews confirmed playback from a local GameCube ISO after the HD opening, a return to the opening and controller skipping with a DualSense. |
 
 The shared ultrawide selection change is included in this source. The intermittent white flash in the forest remains a known issue. Hardware and full-game progression coverage are limited.
 
@@ -32,9 +42,8 @@ The shared ultrawide selection change is included in this source. The intermitte
 
 - The supported input is **Twilight Princess HD for Wii U, USA Rev 2 (v81)**, title ID `00050000-1019E500`. Setup accepts an extracted folder containing `code/Zelda.rpx`, `content/` and `meta/`, a compatible Cemu `.wua` archive, or a `.wud` or `.wux` disc image. Use individual local disc and common-key files for encrypted images. Multi-entry Cemu `keys.txt` import is unsupported. The final private installation check used an extracted folder. Other regions, revisions and update combinations remain outside the tested game inputs.
 - Windows testing targets x86-64 with a Vulkan 1.3 driver or Vulkan 1.1/1.2 with `VK_KHR_dynamic_rendering` and the required dependencies. Use Setup’s **Check Vulkan compatibility** on laptops and dual-GPU machines. The [Windows build guide](docs/windows.md) has the source-build requirements.
-- When using a setup package, extract the entire ZIP into a writable folder and open **Twilight Princess HD.exe**. The default install is `data/` beside the launcher. Hold **Shift** while reopening the launcher, or pass `--setup`, to access repair, install location and save import. Keep a separate installation and save directory for testing.
+- The default install folder is `data/` beside the launcher. Keep any extracted game folder used in place at its selected path.
 - F1 **Controls → Button prompts** offers Auto and manual styles. Auto uses the detected controller family. Virtual controllers can report a different family, so select PlayStation or Xbox explicitly when needed. [Controller prompt notes](docs/button-glyphs-development.md)
-- F1 **Display → Title cinematics** accepts a locally supplied USA GameCube ISO or video and uses a local FFmpeg executable. The optional trailer plays after the HD opening and returns to it after playback. Clear both selections to restore the stock HD loop. The source and public release contain the playback code only. [Cinematic configuration](docs/title-attract-movie.md)
 
 ## Build from source
 
@@ -46,6 +55,6 @@ Keep game files, keys, generated code, linked game executables, saves and option
 
 ## Issues and credits
 
-When reporting a problem, include the source revision, Windows version, GPU and driver, controller mode, resolution and steps to reproduce. For rendering issues, include the presentation rate and whether the issue also occurs at 30 FPS. Redact local paths and credentials from logs.
+Bug reports and community contributions are welcome. Include the setup version, Windows version, GPU and driver, controller mode, resolution and steps to reproduce. For rendering issues, include the presentation rate and whether the issue also occurs at 30 FPS. Redact local paths and credentials from logs. [GitHub Issues](https://github.com/buasfe/twilight-princess-hd-recomp-windows/issues)
 
 Windows development has used extensive AI-assisted coding alongside hands-on testing and debugging by the maintainer. The project is unofficial. Project source is under the [Mozilla Public License 2.0](LICENSE). Vendored dependencies retain their own licence notices. See the [upstream and contributor credits](CREDITS.md).

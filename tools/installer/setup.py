@@ -41,6 +41,7 @@ import subprocess
 import sys
 import struct
 import tarfile
+import tempfile
 import threading
 import time
 import urllib.request
@@ -1461,6 +1462,59 @@ def write_state(data_dir, state):
     os.replace(dest + ".tmp", dest)
 
 
+def cinematic_settings_path(data_dir):
+    override = os.environ.get("WWHD_SETTINGS")
+    if override:
+        return override
+    folder = os.path.join(data_dir, "user") if PORTABLE else os.path.join(os.getenv("APPDATA", "."), "TPHD")
+    return os.path.join(folder, "settings.ini")
+
+
+def read_cinematic_settings(path):
+    try:
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
+            return f.read().splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def save_cinematic(path, iso, ffmpeg):
+    if iso:
+        if not iso.lower().endswith(".iso") or not os.path.isfile(iso):
+            raise SetupError("Choose an uncompressed USA GameCube ISO (.iso) from your own disc.")
+        with open(iso, "rb") as f:
+            header = f.read(0x440)
+        if (len(header) != 0x440 or header[:6] != b"GZ2E01"
+                or struct.unpack_from(">I", header, 0x1c)[0] != 0xc2339f3d):
+            raise SetupError("This is not a supported USA Twilight Princess GameCube ISO (GZ2E01).")
+        if ffmpeg and (not ffmpeg.lower().endswith(".exe") or not os.path.isfile(ffmpeg)):
+            raise SetupError("Choose a local ffmpeg.exe or clear the decoder selection to use FFmpeg on PATH.")
+        if not ffmpeg and not shutil.which("ffmpeg"):
+            raise SetupError("FFmpeg was not found on PATH. Choose your local ffmpeg.exe before applying.")
+    else:
+        ffmpeg = ""
+
+    keys = {"attractIso", "attractFfmpeg", "attractVideo"}
+    lines = [line for line in read_cinematic_settings(path) if line.partition("=")[0] not in keys]
+    if iso:
+        lines.append("attractIso=" + os.path.abspath(iso))
+        if ffmpeg:
+            lines.append("attractFfmpeg=" + os.path.abspath(ffmpeg))
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", errors="surrogateescape", newline="\n",
+                                         dir=folder, delete=False) as f:
+            temp = f.name
+            f.writelines(line + "\n" for line in lines)
+        os.replace(temp, path)
+        temp = None
+    finally:
+        if temp:
+            os.unlink(temp)
+
+
 class Ctx:
     """What one setup run works with (paths, the release, the options)."""
 
@@ -2021,6 +2075,26 @@ def gui_main(args):
         except SetupError as e:
             fail(req, "save", str(e)[0].upper() + str(e)[1:])
 
+    def do_get_cinematic(req):
+        try:
+            lines = read_cinematic_settings(cinematic_settings_path(ctx.data_dir))
+            options = dict(line.split("=", 1) for line in lines if "=" in line)
+            reply(req, iso=options.get("attractIso", ""), ffmpeg=options.get("attractFfmpeg", ""))
+        except OSError as e:
+            fail(req, "cinematic", "Could not read the cinematic settings: %s" % e)
+
+    def do_set_cinematic(req):
+        if not ctx.installed():
+            return fail(req, "cinematic", "Install the game before choosing a title-screen cinematic.")
+        try:
+            iso = req.get("iso") or ""
+            save_cinematic(cinematic_settings_path(ctx.data_dir), iso, req.get("ffmpeg") or "")
+            reply(req, iso=iso, ffmpeg=(req.get("ffmpeg") or "") if iso else "",
+                  message=("GameCube cinematic selected. Keep the ISO and FFmpeg in their selected locations."
+                                if iso else "The original Wii U title-screen behaviour is selected."))
+        except (SetupError, OSError) as e:
+            fail(req, "cinematic", str(e))
+
     def do_remove_toolchain(req):
         reply(req, freed=remove_toolchain(ctx.data_dir))
 
@@ -2040,6 +2114,8 @@ def gui_main(args):
     handlers = {"probe": probe, "location": location, "check_keys": check, "install": do_install, "import_save": do_import_save,
                 "remove_toolchain": do_remove_toolchain, "shortcut": do_shortcut, "launch": do_launch,
                 "hello": lambda req: hello()}
+    if IS_WIN:
+        handlers.update(get_cinematic=do_get_cinematic, set_cinematic=do_set_cinematic)
     hello()
     for line in sys.stdin:
         line = line.strip()

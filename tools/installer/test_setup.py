@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,40 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import setup  # noqa: E402
 
 KEY_HEX = "0011223344556677" "8899aabbccddeeff"  # made-up test value
+
+
+class Cinematic(unittest.TestCase):
+    def test_invalid_selection_keeps_settings_and_clear_restores_wii_u(self):
+        with tempfile.TemporaryDirectory(prefix="Player QA ") as tmp:
+            folder = Path(tmp)
+            settings = folder / "user" / "settings.ini"
+            settings.parent.mkdir()
+            original = "# Settings\npromptStyle=PlayStation\nattractVideo=old.mkv\n"
+            settings.write_text(original, encoding="utf-8")
+            iso = folder / "GameCube disc.iso"
+            iso.write_bytes(b"invalid")
+            with self.assertRaisesRegex(setup.SetupError, "supported USA Twilight Princess"):
+                setup.save_cinematic(settings, str(iso), "")
+            self.assertEqual(settings.read_text(encoding="utf-8"), original)
+
+            header = bytearray(0x440)
+            header[:6] = b"GZ2E01"
+            struct.pack_into(">I", header, 0x1c, 0xc2339f3d)
+            iso.write_bytes(header)
+            with mock.patch.object(setup.shutil, "which", return_value=None):
+                with self.assertRaisesRegex(setup.SetupError, "FFmpeg was not found"):
+                    setup.save_cinematic(settings, str(iso), "")
+            self.assertEqual(settings.read_text(encoding="utf-8"), original)
+
+            decoder = folder / "tools with spaces" / "ffmpeg.exe"
+            decoder.parent.mkdir()
+            decoder.touch()
+            setup.save_cinematic(settings, str(iso), str(decoder))
+            self.assertEqual(setup.read_cinematic_settings(settings), [
+                "# Settings", "promptStyle=PlayStation", f"attractIso={iso}", f"attractFfmpeg={decoder}"])
+
+            setup.save_cinematic(settings, "", "")
+            self.assertEqual(setup.read_cinematic_settings(settings), ["# Settings", "promptStyle=PlayStation"])
 
 
 class Keys(unittest.TestCase):

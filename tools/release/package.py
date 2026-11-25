@@ -57,8 +57,12 @@ By default the installation is in data/ next to the launcher. Setup can also use
 you choose. Keep that folder and the launcher if you want to continue using the installation.
 An extracted source folder is used where it is. Keep it at the selected path.
 
-Hold Shift while opening the launcher, or use --setup, to repair, set up in another folder or import a save.
+Hold Shift while opening the launcher, or use --setup, for repair, a different install location, save import
+or the optional GameCube title-screen cinematic. That option uses your own USA GameCube ISO and local FFmpeg.
 If the graphical interface cannot start, use tools/Setup in a console window.bat.
+
+By using this Windows setup, you agree to the Microsoft Distributable Code restrictions in
+tools/python/LICENSE.txt. See third-party-licenses/README.txt for other bundled software notices.
 """
 PORTABLE_TXT = """Twilight Princess HD (native macOS port), portable release.
 
@@ -456,6 +460,7 @@ def main():
     copy(os.path.join(ROOT, "README.md"), os.path.join(pkg, "README.md"))
     if windows:
         copy(os.path.join(ROOT, "CREDITS.md"), os.path.join(pkg, "CREDITS.md"))
+        copy(os.path.join(ROOT, "docs", "title-attract-movie.md"), os.path.join(pkg, "docs", "title-attract-movie.md"))
         with open(os.path.join(pkg, "SOURCE.txt"), "w", encoding="utf-8") as f:
             f.write("MPL-2.0 source for this setup and runtime:\n"
                     "https://github.com/buasfe/twilight-princess-hd-recomp-windows/tree/%s\n" % a.version)
