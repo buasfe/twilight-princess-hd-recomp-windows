@@ -1904,7 +1904,8 @@ static void start_child() {
              A.pkg);
         return;
     }
-    args = {bundled_python(A.pkg), A.pkg + "tools\\installer\\setup.py"};
+    // The GUI sends UTF-8 paths over the protocol pipe, even on non-UTF-8 Windows locales.
+    args = {bundled_python(A.pkg), "-X", "utf8", A.pkg + "tools\\installer\\setup.py"};
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "PYTHONDONTWRITEBYTECODE", "1", true);
 #else
     args = {"/bin/sh", A.pkg + "tools/setup-in-terminal.sh"};
